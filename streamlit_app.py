@@ -6,8 +6,7 @@ Run:
 
 Notes:
 - Supported files: JPG/PNG/MP4 (tweak below).
-- Each tab expects 10–12 files and previews images/videos.
-- "Creative Test 업로드하기" creates a (paused) ad set + ads via Meta Marketing API using per-title settings.
+f"- Each tab accepts **video files only**: {', '.join(t.upper() for t in accepted_types)} (limit {MAX_UPLOAD_MB}MB per file)."- "Creative Test 업로드하기" creates a (paused) ad set + ads via Meta Marketing API using per-title settings.
 """
 
 from __future__ import annotations
@@ -15,12 +14,18 @@ from __future__ import annotations
 import os
 from typing import Dict, List
 from datetime import datetime, timedelta, timezone
-import pathlib
 import tempfile
+import logging
+import requests
+from types import SimpleNamespace
 
 import streamlit as st
 
 # ----- UI/Validation helpers --------------------------------------------------
+try:
+    MAX_UPLOAD_MB = int(st.get_option("server.maxUploadSize"))
+except Exception:
+    MAX_UPLOAD_MB = 200  # Streamlit default if option missing
 
 def init_state():
     """Ensure we have places to store uploads and per-game settings in session state."""
@@ -28,6 +33,11 @@ def init_state():
         st.session_state.uploads = {}
     if "settings" not in st.session_state:
         st.session_state.settings = {}
+
+def init_remote_state():
+    """Ensure we have a place to store server-downloaded (URL) videos per game."""
+    if "remote_videos" not in st.session_state:
+        st.session_state.remote_videos = {}  # {game: [ {"name":..., "path":...}, ... ]}
 
 def ensure_settings_state():
     """Ensure we have a per-game dict in session_state for settings."""
@@ -101,22 +111,82 @@ def make_ad_name(filename: str, prefix: str | None) -> str:
     """Build ad name from filename and optional prefix."""
     return f"{prefix.strip()}_{filename}" if prefix else filename
 
+def _normalize_drive_url(url: str) -> str:
+    """Turn common Google Drive share links into direct-download links."""
+    url = url.strip()
+    if "drive.google.com/file/d/" in url:
+        try:
+            file_id = url.split("/file/d/")[1].split("/")[0]
+            return f"https://drive.google.com/uc?export=download&id={file_id}"
+        except Exception:
+            return url
+    return url
+
+def fetch_url_to_tmp(url: str, timeout: int = 600) -> dict:
+    """Download a remote video URL to a temp file and return {'name': str, 'path': str}."""
+    url = _normalize_drive_url(url)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    with requests.get(url, headers=headers, stream=True, timeout=timeout) as r:
+        r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "").lower()
+        disp = r.headers.get("Content-Disposition", "")
+        # Guess filename
+        name = None
+        if "filename=" in disp:
+            name = disp.split("filename=")[-1].strip(' \'"')
+        if not name:
+            name = url.split("?")[0].rstrip("/").split("/")[-1] or "video.mp4"
+        # Ensure extension
+        if not name.lower().endswith((".mp4", ".mpeg4")):
+            if "mp4" in ctype or "video" in ctype:
+                name = f"{name}.mp4"
+
+        # Validate content-type
+        if not ("video" in ctype or name.lower().endswith((".mp4", ".mpeg4"))):
+            raise ValueError(f"URL is not a video. Content-Type={ctype!r}")
+
+        # Stream to temp file (1MB chunks)
+        suffix = pathlib.Path(name).suffix.lower() or ".mp4"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    tmp.write(chunk)
+            local_path = tmp.name
+
+    return {"name": pathlib.Path(name).name, "path": local_path}
+
 # ----- Meta (Facebook) Marketing API wiring ----------------------------------
 
-from facebook_business.api import FacebookAdsApi
-from facebook_business.adobjects.adaccount import AdAccount
-from facebook_business.adobjects.adset import AdSet
-from facebook_business.adobjects.adcreative import AdCreative
-from facebook_business.adobjects.ad import Ad
+try:
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.adaccount import AdAccount
+    from facebook_business.adobjects.adset import AdSet
+    from facebook_business.adobjects.adcreative import AdCreative
+    from facebook_business.adobjects.ad import Ad
+    FB_AVAILABLE = True
+    FB_IMPORT_ERROR = ""
+except Exception as _e:
+    FB_AVAILABLE = False
+    FB_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+def _require_fb():
+    """Raise a clear error if Facebook SDK isn't available."""
+    if not FB_AVAILABLE:
+        raise RuntimeError(
+            "facebook-business SDK not available. Install it with:\n"
+            "  pip install facebook-business\n"
+            f"Import error: {FB_IMPORT_ERROR}"
+        )
 
 def init_fb_from_secrets() -> AdAccount:
     """Initialize Meta SDK from Streamlit secrets; return the XP HERO AdAccount."""
+    _require_fb()
     FacebookAdsApi.init(
-        access_token=st.secrets["access_token"],
-        app_id=st.secrets["app_id"],
-        app_secret=st.secrets["app_secret"],
+        access_token=st.secrets.get("access_token", ""),
+        app_id=st.secrets.get("app_id", ""),
+        app_secret=st.secrets.get("app_secret", ""),
     )
-    return AdAccount("act_692755193188182")  # XP HERO ad account
+    return AdAccount("act_692755193188182")   # XP HERO ad account
 
 def next_nth_suffix(account: AdAccount, prefix: str) -> str:
     """Scan existing ad sets and return next ordinal like '35th' for a given prefix."""
@@ -173,11 +243,21 @@ def create_creativetest_adset(
     return adset["id"]
 
 def _save_uploadedfile_tmp(u) -> str:
-    """Persist a Streamlit UploadedFile to a temp file and return its path."""
-    suffix = pathlib.Path(u.name).suffix.lower() or ".mp4"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(u.getbuffer())
-        return tmp.name
+    """
+    Return a local path for a video source.
+    - If u is a Streamlit UploadedFile -> persist to a temp file and return its path
+    - If u is a dict like {'name':..., 'path':...} (from URL) -> return its existing path
+    """
+    # URL-imported object
+    if isinstance(u, dict) and "path" in u and "name" in u:
+        return u["path"]
+    # Streamlit UploadedFile
+    if hasattr(u, "getbuffer"):
+        suffix = pathlib.Path(u.name).suffix.lower() or ".mp4"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(u.getbuffer())
+            return tmp.name
+    raise ValueError("Unsupported video object type for saving.")
 
 def upload_videos_create_ads(
     account: AdAccount,
@@ -188,7 +268,8 @@ def upload_videos_create_ads(
     ad_name_prefix: str | None = None,
 ):
     """For each MP4: upload video → create creative → create paused ad in the given ad set."""
-    videos = [u for u in uploaded_files if pathlib.Path(u.name).suffix.lower() == ".mp4"]
+    allowed = {".mp4", ".mpeg4"}
+    videos = [u for u in uploaded_files if pathlib.Path(u.name).suffix.lower() in allowed]
     for u in videos:
         path = _save_uploadedfile_tmp(u)
         video = account.create_ad_video(params={"file": path})
@@ -231,9 +312,13 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
         suffix_str = next_nth_suffix(account, adset_prefix)  # read-only scan of ad sets
 
     # Videos & ad names
-    vids = [u for u in uploaded_files if pathlib.Path(u.name).suffix.lower() == ".mp4"]
+    allowed = {".mp4", ".mpeg4"}
+    remote = st.session_state.remote_videos.get(settings.get("game_key", ""), [])
+    vids = [u for u in uploaded_files if pathlib.Path(u.name).suffix.lower() in allowed] + remote
+
     ad_name_prefix = settings.get("ad_name_prefix") if settings.get("ad_name_mode") == "Prefix + filename" else None
-    ad_names = [make_ad_name(u.name, ad_name_prefix) for u in vids]
+    def _fname(x): return x.name if hasattr(x, "name") else x["name"]
+    ad_names = [make_ad_name(_fname(u), ad_name_prefix) for u in vids]
 
     return {
         "campaign_id": campaign_id,
@@ -327,7 +412,14 @@ st.set_page_config(page_title="Creative 자동 업로드", page_icon="🎮", lay
 st.title("🎮 Creative 자동 업로드")
 st.caption("Collect, validate, and upload creatives per game with configurable settings.")
 
+with st.expander("🔧 Debug: server upload settings", expanded=False):
+    try:
+        st.write("server.maxUploadSize =", st.get_option("server.maxUploadSize"))
+        st.write("server.maxMessageSize =", st.get_option("server.maxMessageSize"))
+    except Exception as e:
+        st.write("Could not read options:", e)
 init_state()
+init_remote_state()
 
 NUM_GAMES = 10
 GAMES = game_tabs(NUM_GAMES)
@@ -364,7 +456,7 @@ for i, game in enumerate(GAMES):
                 type=accepted_types,
                 accept_multiple_files=True,
                 key=f"uploader_{i}",
-                help="Hold Shift/Cmd/Ctrl to select multiple videos.",
+                help=f"Hold Shift/Cmd/Ctrl to select multiple videos. Limit {MAX_UPLOAD_MB}MB per file.",
             )
 
             # live preview (lightweight)
@@ -384,7 +476,30 @@ for i, game in enumerate(GAMES):
             # NEW: Clear only the current selection in the uploader (does not touch saved uploads)
             if st.button("선택 파일 모두 지우기", key=f"clear_selected_{i}", help="현재 탭에서 방금 선택한 파일들을 모두 해제합니다."):
                 st.session_state[f"clear_uploader_flag_{i}"] = True   # set flag
-                st.rerun()                                            # next run will clear before creating widget
+                st.rerun()
+            
+            st.markdown("**Add video by URL (server-side download)**")
+            url_val = st.text_input("Paste a direct or Drive link", key=f"urlinput_{i}", placeholder="https://...")
+            if st.button("Add URL video", key=f"addurl_{i}"):
+                try:
+                    meta = fetch_url_to_tmp(url_val)
+                    lst = st.session_state.remote_videos.get(game, [])
+                    lst.append(meta)
+                    st.session_state.remote_videos[game] = lst
+                    st.success(f"Added: {meta['name']}")
+                except Exception as e:
+                    st.exception(e)
+                    st.error("Could not fetch this URL. Check the link or permissions.")
+
+            remote_list = st.session_state.remote_videos.get(game, [])
+            if remote_list:
+                st.caption("Server-downloaded videos:")
+                for it in remote_list[:20]:
+                    st.write("•", it["name"])
+                if st.button("Clear URL videos", key=f"clearurl_{i}"):
+                    st.session_state.remote_videos[game] = []
+                    st.info("Cleared URL videos for this game.")
+                    st.rerun()                                            # next run will clear before creating widget
 
             # --- ACTION BUTTONS ---
             st.markdown("### Actions")
@@ -469,27 +584,32 @@ for i, game in enumerate(GAMES):
             )
 
             st.session_state.settings[game] = {
-                "country": (country or "US").strip(),
-                "daily_budget_usd": int(daily_budget_usd),
-                "suffix_number": int(suffix_number) if int(suffix_number) > 0 else None,
-                "app_store": app_store,
-                "age_min": int(age_min),
-                "ad_name_mode": ad_name_mode,
-                "ad_name_prefix": ad_name_prefix.strip(),
-                "start_iso": start_iso.strip(),
-                "end_iso": end_iso.strip(),
-            }
+            "country": (country or "US").strip(),
+            "daily_budget_usd": int(daily_budget_usd),
+            "suffix_number": int(suffix_number) if int(suffix_number) > 0 else None,
+            "app_store": app_store,
+            "age_min": int(age_min),
+            "ad_name_mode": ad_name_mode,
+            "ad_name_prefix": ad_name_prefix.strip(),
+            "start_iso": start_iso.strip(),
+            "end_iso": end_iso.strip(),
+            "game_key": game,  # <-- add this
+        }
 
         # --- Handle button actions after UI is drawn ---
         if cont:
-            ok, msg = validate_count(uploaded or [])
+            # Combine browser uploads + server-downloaded URL videos
+            remote_list = st.session_state.remote_videos.get(game, [])
+            combined = (uploaded or []) + remote_list
+
+            ok, msg = validate_count(combined)
             if not ok:
                 ok_msg_placeholder.error(msg)
             else:
                 try:
-                    st.session_state.uploads[game] = uploaded
+                    st.session_state.uploads[game] = uploaded  # keep native uploads separately if you like
                     settings = st.session_state.settings.get(game, {})
-                    plan = upload_to_facebook(game, uploaded, settings, simulate=dry_run)
+                    plan = upload_to_facebook(game, combined, settings, simulate=dry_run)
                     if dry_run:
                         ok_msg_placeholder.info("Dry run only — no ad set or ads were created.")
                         st.write("**Planned Ad Set:**", plan["adset_name"])
@@ -513,9 +633,10 @@ for i, game in enumerate(GAMES):
 
         if clr:
             st.session_state.uploads.pop(game, None)
+            st.session_state.remote_videos.pop(game, None)  # also clear URL videos
             st.session_state[f"uploader_{i}"] = None
             st.session_state.settings.pop(game, None)
-            ok_msg_placeholder.info("Cleared saved uploads and settings for this game.")
+            ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
             st.rerun()
 
 st.divider()
