@@ -20,6 +20,7 @@ import requests
 from types import SimpleNamespace
 
 import streamlit as st
+from drive_import import import_drive_folder_videos
 
 # ----- UI/Validation helpers --------------------------------------------------
 try:
@@ -479,27 +480,50 @@ for i, game in enumerate(GAMES):
                 st.rerun()
             
             st.markdown("**Add video by URL (server-side download)**")
-            url_val = st.text_input("Paste a direct or Drive link", key=f"urlinput_{i}", placeholder="https://...")
+            url_val = st.text_input("Paste a direct video link or Drive *file* link", key=f"urlinput_{i}", placeholder="https://…")
             if st.button("Add URL video", key=f"addurl_{i}"):
                 try:
-                    meta = fetch_url_to_tmp(url_val)
+                    meta = fetch_url_to_tmp(url_val)  # keeps your existing single-file URL fetcher
                     lst = st.session_state.remote_videos.get(game, [])
                     lst.append(meta)
                     st.session_state.remote_videos[game] = lst
                     st.success(f"Added: {meta['name']}")
                 except Exception as e:
                     st.exception(e)
-                    st.error("Could not fetch this URL. Check the link or permissions.")
+                    st.error("Could not fetch this URL. Check the link (must be a *file*, not a folder).")
 
+            # --- Import videos from Google Drive folder (server-side) ---
+            st.markdown("**Import all videos from a Google Drive folder (server-side)**")
+            drv_input = st.text_input(
+                "Drive folder URL or ID",
+                key=f"drive_folder_{i}",
+                placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
+            )
+            if st.button("Import videos from folder", key=f"drive_import_{i}"):
+                try:
+                    with st.spinner("Importing videos from Drive folder..."):
+                        imported = import_drive_folder_videos(drv_input)  # from drive_import.py
+                        lst = st.session_state.remote_videos.get(game, [])
+                        lst.extend(imported)
+                        st.session_state.remote_videos[game] = lst
+                    st.success(f"Imported {len(imported)} video(s) from the folder.")
+                except Exception as e:
+                    st.exception(e)
+                    st.error(
+                        "Could not import from this folder. "
+                        "Make sure your service account has access and the folder contains videos."
+                    )
+
+            # --- Shared list & clear button for all remote videos (URL + Drive) ---
             remote_list = st.session_state.remote_videos.get(game, [])
             if remote_list:
                 st.caption("Server-downloaded videos:")
-                for it in remote_list[:20]:
+                for it in remote_list[:50]:
                     st.write("•", it["name"])
-                if st.button("Clear URL videos", key=f"clearurl_{i}"):
+                if st.button("Clear URL/Drive videos", key=f"clearurl_{i}"):
                     st.session_state.remote_videos[game] = []
-                    st.info("Cleared URL videos for this game.")
-                    st.rerun()                                            # next run will clear before creating widget
+                    st.info("Cleared remote videos for this game.")
+                    st.rerun()                                          # next run will clear before creating widget
 
             # --- ACTION BUTTONS ---
             st.markdown("### Actions")
