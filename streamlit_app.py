@@ -1031,7 +1031,61 @@ def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, 
             "campaign_id": "120218934861590118",
             "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
             "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
-            "page_id": st.secrets["page_id"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_xp"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Dino Universe": {
+            "campaign_id": "120203672340130431",
+            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
+            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_dino"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Snake Clash": {
+            "campaign_id": "120201313657080615",
+            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
+            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_snake"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Pizza Ready": {
+            "campaign_id": "120200161907250465",
+            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
+            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_pizza"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Cafe Life": {
+            "campaign_id": "120231530818850361",
+            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
+            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_cafe"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Suzy's Restaurant": {
+            "campaign_id": "120217220153800643",
+            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
+            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_suzy"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Office Life": {
+            "campaign_id": "120228464454680636",
+            "campaign_name": "corporatetycoon_aos_facebook_us_creativetest",
+            "adset_prefix": "corporatetycoon_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_office"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Lumber Chopper": {
+            "campaign_id": "120224569359980144",
+            "campaign_name": "lumberchopper_aos_facebook_us_creativetest",
+            "adset_prefix": "lumberchopper_aos_facebook_us_creativetest",
+            "page_id": st.secrets["page_id_lumber"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Burger Please": {
+            "campaign_id": "120200361364790724",
+            "campaign_name": "burgeridle_aos_facebook_us_test_30th+",
+            "adset_prefix": "burgeridle_aos_facebook_us_test",
+            "page_id": st.secrets["page_id_burger"],  # MUST be a Facebook Page ID, NOT the ad account ID
+        },
+        "Prison Life": {
+            "campaign_id": "120212520882120614",
+            "campaign_name": "prison_aos_facebook_us_install_test",
+            "adset_prefix": "prison_aos_facebook_us_install_test",
+            "page_id": st.secrets["page_id_prison"],  # MUST be a Facebook Page ID, NOT the ad account ID
         }
     }
     if game_name not in mapping:
