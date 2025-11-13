@@ -1016,10 +1016,9 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
         "page_id": page_id,
         "n_videos": len(vids_all),
         "ad_names": ad_names,
-         # ▼ add these
+        # ▼ extra metadata for summary
         "campaign_name": settings.get("campaign_name"),  # will be set by caller
         "app_store": settings.get("app_store"),
-        "app_name": settings.get("app_name"),
         "opt_goal_label": settings.get("opt_goal_label"),
     }
 
@@ -1170,6 +1169,61 @@ with st.expander("🔧 Debug: server upload settings", expanded=False):
         st.write("Could not read options:", e)
 init_state()
 init_remote_state()
+
+# --- XP HERO default app config (App ID + Store URL) ---
+GAME_DEFAULTS = {
+    "XP HERO": {
+        "fb_app_id": "519275767201283",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.weaponrpg",
+    },
+    "Dino Universe": {
+        "fb_app_id": "722279627640461",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.ageofdinosaurs",
+    },
+    "Snake Clash": {
+        "fb_app_id": "102629376270269",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.linkedcubic",
+    },
+    "Pizza Ready": {
+        "fb_app_id": "115469331609377",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.pizzaidle",
+    },
+    "Cafe Life": {
+        "fb_app_id": "607125849162050",
+        "store_url": "https://play.google.com/store/apps/details?id=com.fireshrike.h2",
+    },
+    "Suzy's Restaurant": {
+        "fb_app_id": "608844445639579",
+        "store_url": "https://play.google.com/store/apps/details?id=com.corestudiso.suzyrest",
+    },
+    "Office Life": {
+        "fb_app_id": "743103455548945",
+        "store_url": "https://play.google.com/store/apps/details?id=com.funreal.corporatetycoon",
+    },
+    "Lumber Chopper": {
+        "fb_app_id": "729295830272629",
+        "store_url": "https://play.google.com/store/apps/details?id=dasi.prs2.lumberchopper",
+    },
+    "Burger Please": {
+        "fb_app_id": "729295830272629",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.burgeridle",
+    },
+    "Prison Life": {
+        "fb_app_id": "368211056367446",
+        "store_url": "https://play.google.com/store/apps/details?id=io.supercent.prison",
+    },
+}
+
+# Apply defaults WITHOUT overwriting existing user settings
+for game, defaults in GAME_DEFAULTS.items():
+    cur = st.session_state.settings.get(game, {})  # may be {}
+    if not cur.get("fb_app_id") and defaults.get("fb_app_id"):
+        cur["fb_app_id"] = defaults["fb_app_id"]
+    if not cur.get("store_url") and defaults.get("store_url"):
+        cur["store_url"] = defaults["store_url"]
+    st.session_state.settings[game] = cur
+# --- end per-game defaults ---
+# --- end XP HERO defaults ---
 
 NUM_GAMES = 10
 GAMES = game_tabs(NUM_GAMES)
@@ -1352,16 +1406,19 @@ for i, game in enumerate(GAMES):
             clr = st.button("업로드 파일 초기화", key=f"clear_{i}")
 
         # ----- RIGHT: SETTINGS PANEL -----
-        # ----- RIGHT: SETTINGS PANEL -----
         with right:
             ensure_settings_state()
             st.markdown("### Settings")
 
             cur = st.session_state.settings.get(game, {})
+
+        
+
             # 1) 광고 세트 이름: campaign_name + "_nth"
             suffix_number = st.number_input(
                 "광고 세트 접미사 n (…_nth)",
-                min_value=1, step=1,
+                min_value=1,
+                step=1,
                 value=int(cur.get("suffix_number", 1)),
                 help="Ad set will be named as <campaign_name>_<n>th",
                 key=f"suffix_{i}",
@@ -1375,24 +1432,18 @@ for i, game in enumerate(GAMES):
                 key=f"appstore_{i}",
             )
 
-            # 3) 앱 이름 / 앱 연결 정보 (간단 버전: 수동 입력)
-            app_name = st.text_input(
-                "앱 이름(표시용)",
-                value=cur.get("app_name", game),
-                key=f"appname_{i}",
-                help="표시용 이름. 추후 FB의 앱/스토어 목록을 자동으로 불러오는 기능 추가 가능."
-            )
+            # 3) 앱 연결 정보
             fb_app_id = st.text_input(
-                "Facebook App ID (선택)",
+                "Facebook App ID",
                 value=cur.get("fb_app_id", ""),
                 key=f"fbappid_{i}",
-                help="설치 추적을 연결하려면 FB App ID를 입력하세요(선택)."
+                help="설치 추적을 연결하려면 FB App ID를 입력하세요(선택).",
             )
             store_url = st.text_input(
-                "앱 스토어 URL",
+                "구글 스토어 URL",
                 value=cur.get("store_url", ""),
                 key=f"storeurl_{i}",
-                help="예) https://play.google.com/store/apps/details?id=... (쿼리스트링/트래킹 파라미터 제거 권장)"
+                help="예) https://play.google.com/store/apps/details?id=... (쿼리스트링/트래킹 파라미터 제거 권장)",
             )
 
             # 4) 성과 목표 (기본: 앱 설치수 극대화)
@@ -1403,15 +1454,16 @@ for i, game in enumerate(GAMES):
                 key=f"optgoal_{i}",
             )
 
-            # 5) 기여 설정 (FB UI에서 캠페인/계정 레벨로 고정되는 부분이 많아 여기서는 노출만)
+            # 5) 기여 설정 (표시용 안내)
             st.caption("기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — Facebook에서 고정/제한될 수 있습니다.")
 
             # 6) 예산 (per-video × 개수)
             budget_per_video_usd = st.number_input(
                 "영상 1개당 일일 예산 (USD)",
-                min_value=1, value=int(cur.get("budget_per_video_usd", 10)),
+                min_value=1,
+                value=int(cur.get("budget_per_video_usd", 10)),
                 key=f"budget_per_video_{i}",
-                help="총 일일 예산 = (업로드/선택된 영상 수) × 이 값"
+                help="총 일일 예산 = (업로드/선택된 영상 수) × 이 값",
             )
 
             # 7) 예약 (기본: 토 00:00 → 월 12:00 KST)
@@ -1433,61 +1485,76 @@ for i, game in enumerate(GAMES):
             country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
 
             # 9) 최소 연령 (기본 18)
-            age_min = st.number_input("최소 연령", min_value=13, value=int(cur.get("age_min", 18)), key=f"age_{i}")
+            age_min = st.number_input(
+                "최소 연령",
+                min_value=13,
+                value=int(cur.get("age_min", 18)),
+                key=f"age_{i}",
+            )
 
             # 10) OS/버전 (기본: Android only, 6.0+)
             os_choice = st.selectbox(
                 "Target OS",
                 ["Both", "Android only", "iOS only"],
-                index={"Both":0, "Android only":1, "iOS only":2}[cur.get("os_choice", "Android only")],
+                index={"Both": 0, "Android only": 1, "iOS only": 2}[cur.get("os_choice", "Android only")],
                 key=f"os_choice_{i}",
             )
-            min_android_label = st.selectbox(
-                "Min Android version",
-                list(ANDROID_OS_CHOICES.keys()),
-                index=list(ANDROID_OS_CHOICES.keys()).index(cur.get("min_android_label", "6.0+")),
-                key=f"min_android_{i}",
-            ) if os_choice in ("Both", "Android only") else "None (any)"
-            min_ios_label = st.selectbox(
-                "Min iOS version",
-                list(IOS_OS_CHOICES.keys()),
-                index=list(IOS_OS_CHOICES.keys()).index(cur.get("min_ios_label", "None (any)")),
-                key=f"min_ios_{i}",
-            ) if os_choice in ("Both", "iOS only") else "None (any)"
+
+            if os_choice in ("Both", "Android only"):
+                min_android_label = st.selectbox(
+                    "Min Android version",
+                    list(ANDROID_OS_CHOICES.keys()),
+                    index=list(ANDROID_OS_CHOICES.keys()).index(cur.get("min_android_label", "6.0+")),
+                    key=f"min_android_{i}",
+                )
+            else:
+                min_android_label = "None (any)"
+
+            if os_choice in ("Both", "iOS only"):
+                min_ios_label = st.selectbox(
+                    "Min iOS version",
+                    list(IOS_OS_CHOICES.keys()),
+                    index=list(IOS_OS_CHOICES.keys()).index(cur.get("min_ios_label", "None (any)")),
+                    key=f"min_ios_{i}",
+                )
+            else:
+                min_ios_label = "None (any)"
+
             min_android_os_token = ANDROID_OS_CHOICES[min_android_label] if os_choice in ("Both", "Android only") else None
             min_ios_os_token = IOS_OS_CHOICES[min_ios_label] if os_choice in ("Both", "iOS only") else None
 
             # (선택) 광고 이름 규칙
             ad_name_mode = st.selectbox(
-                "Ad name", ["Use video filename", "Prefix + filename"],
+                "Ad name",
+                ["Use video filename", "Prefix + filename"],
                 index=1 if cur.get("ad_name_mode") == "Prefix + filename" else 0,
                 key=f"adname_mode_{i}",
             )
             ad_name_prefix = ""
             if ad_name_mode == "Prefix + filename":
-                ad_name_prefix = st.text_input("Ad name prefix", value=cur.get("ad_name_prefix", ""), key=f"adname_prefix_{i}")
+                ad_name_prefix = st.text_input(
+                    "Ad name prefix",
+                    value=cur.get("ad_name_prefix", ""),
+                    key=f"adname_prefix_{i}",
+                )
 
-            # --- Save settings ---
+            # --- Save settings back into session_state ---
             st.session_state.settings[game] = {
                 "suffix_number": int(suffix_number),
                 "app_store": app_store,
-                "app_name": app_name,
                 "fb_app_id": fb_app_id.strip(),
                 "store_url": store_url.strip(),
                 "opt_goal_label": opt_goal_label,
                 "budget_per_video_usd": int(budget_per_video_usd),
-
                 "start_iso": start_iso.strip(),
                 "end_iso": end_iso.strip(),
                 "country": (country or "US").strip(),
                 "age_min": int(age_min),
-
                 "os_choice": os_choice,
                 "min_android_label": min_android_label,
                 "min_ios_label": min_ios_label,
                 "min_android_os_token": min_android_os_token,
                 "min_ios_os_token": min_ios_os_token,
-
                 "ad_name_mode": ad_name_mode,
                 "ad_name_prefix": ad_name_prefix.strip(),
                 "game_key": game,
@@ -1525,7 +1592,6 @@ for i, game in enumerate(GAMES):
                         min_android = settings.get("min_android_label", "None (any)")
                         min_ios = settings.get("min_ios_label", "None (any)")
                         campaign_name = plan.get("campaign_name") or settings.get("campaign_name") or "—"
-                        app_name = plan.get("app_name") or settings.get("app_name") or "—"
                         app_store = plan.get("app_store") or settings.get("app_store") or "—"
                         opt_goal_label = plan.get("opt_goal_label") or settings.get("opt_goal_label") or "앱 설치수 극대화"
 
@@ -1560,7 +1626,6 @@ for i, game in enumerate(GAMES):
                             <div class="label">Campaign ID</div><div class="mono">{plan.get('campaign_id','—')}</div>
                             <div class="label">Ad Set Name</div><div class="mono">{adset_name_disp}</div>
 
-                            <div class="label">App Name</div><div>{app_name}</div>
                             <div class="label">App Store</div><div>{app_store}</div>
                             <div class="label">Optimization Goal</div><div>{opt_goal_label}</div>
 
@@ -1613,7 +1678,6 @@ for i, game in enumerate(GAMES):
                             row("Campaign", campaign_name)
                             row("Campaign ID", plan.get("campaign_id","—"))
                             row("Ad Set Name", adset_name_disp)
-                            row("App Name", app_name)
                             row("App Store", app_store)
                             row("Optimization Goal", opt_goal_label)
                             row("Country/Age", f"{plan['country']} / {plan['age_min']}+")
@@ -1657,10 +1721,15 @@ for i, game in enumerate(GAMES):
 
 
         if clr:
+            # Clear saved data for this game
             st.session_state.uploads.pop(game, None)
-            st.session_state.remote_videos.pop(game, None)  # also clear URL videos
-            st.session_state[f"uploader_{i}"] = None
+            st.session_state.remote_videos.pop(game, None)  # also clear URL/Drive videos
             st.session_state.settings.pop(game, None)
+
+            # Mark the uploader to be cleared on the NEXT run,
+            # BEFORE the widget is created again.
+            st.session_state[f"clear_uploader_flag_{i}"] = True
+
             ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
             st.rerun()
 
