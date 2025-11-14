@@ -20,6 +20,13 @@ import io
 from datetime import datetime, timedelta, timezone
 import tempfile
 import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 import requests
 import pathlib
 from types import SimpleNamespace
@@ -1246,7 +1253,7 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.weaponrpg",
     },
     "Dino Universe": {
-        "fb_app_id": "722279627640461",
+        "fb_app_id": "1665399243918955",
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.ageofdinosaurs",
     },
     "Snake Clash": {
@@ -1254,11 +1261,11 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.linkedcubic",
     },
     "Pizza Ready": {
-        "fb_app_id": "115469331609377",
+        "fb_app_id": "1475920199615616",
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.pizzaidle",
     },
     "Cafe Life": {
-        "fb_app_id": "607125849162050",
+        "fb_app_id": "1343040866909064",
         "store_url": "https://play.google.com/store/apps/details?id=com.fireshrike.h2",
     },
     "Suzy's Restaurant": {
@@ -1266,7 +1273,7 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=com.corestudiso.suzyrest",
     },
     "Office Life": {
-        "fb_app_id": "743103455548945",
+        "fb_app_id": "562244766249471",
         "store_url": "https://play.google.com/store/apps/details?id=com.funreal.corporatetycoon",
     },
     "Lumber Chopper": {
@@ -1318,58 +1325,8 @@ for i, game in enumerate(GAMES):
         left, right = st.columns([2, 1], gap="large")
 
         # ----- LEFT: uploader + live preview + ACTIONS -----
+                # ----- LEFT: server-side videos + ACTIONS -----
         with left:
-            # 1) If we set the clear flag in the previous run, clear the uploader BEFORE creating it
-            if st.session_state.get(f"clear_uploader_flag_{i}"):
-                st.session_state.pop(f"uploader_{i}", None)          # remove widget state
-                st.session_state.pop(f"clear_uploader_flag_{i}", None)
-
-            uploaded = st.file_uploader(
-                "Upload video files (MP4/MPEG4) — any count",
-                type=accepted_types,
-                accept_multiple_files=True,
-                key=f"uploader_{i}",
-                help=f"Hold Shift/Cmd/Ctrl to select multiple videos. Limit {MAX_UPLOAD_MB}MB per file.",
-            )
-
-            # live preview (lightweight)
-            if uploaded:
-                allowed = {".mp4", ".mpeg4"}
-                vids = [u for u in uploaded if pathlib.Path(u.name).suffix.lower() in allowed]
-                non_video = [u.name for u in uploaded if pathlib.Path(u.name).suffix.lower() not in allowed]
-
-                if non_video:
-                    st.warning("Non-video files will be ignored: " + ", ".join(non_video[:5]) + ("…" if len(non_video) > 5 else ""))
-
-                if vids:
-                    st.markdown("**Videos**")
-                    for u in vids:
-                        st.write("•", u.name)
-
-            # NEW: Clear only the current selection in the uploader (does not touch saved uploads)
-            if st.button("선택 파일 모두 지우기", key=f"clear_selected_{i}", help="현재 탭에서 방금 선택한 파일들을 모두 해제합니다."):
-                st.session_state[f"clear_uploader_flag_{i}"] = True   # set flag
-                st.rerun()
-            
-            st.markdown("**Add video by URL (server-side download)**")
-            url_val = st.text_input("Paste a direct video link or Drive *file* link", key=f"urlinput_{i}", placeholder="https://…")
-            if st.button("Add URL video", key=f"addurl_{i}"):
-                try:
-                    meta = fetch_url_to_tmp(url_val)  # keeps your existing single-file URL fetcher
-                    lst = st.session_state.remote_videos.get(game, [])
-                    lst.append(meta)
-                    st.session_state.remote_videos[game] = lst
-                    st.success(f"Added: {meta['name']}")
-                except Exception as e:
-                    st.exception(e)
-                    try:
-                        hint = _friendly_fb_error(e)
-                        st.markdown(hint, unsafe_allow_html=True)
-                    except Exception:
-                        pass
-                    ok_msg_placeholder.error("Meta upload failed due to permissions. See guidance above.")
-
-            # --- Import videos from Google Drive folder (server-side) ---
             # --- Import videos from Google Drive folder (server-side) ---
             st.markdown("**Import all videos from a Google Drive folder (server-side)**")
             drv_input = st.text_input(
@@ -1432,7 +1389,7 @@ for i, game in enumerate(GAMES):
                 if st.button("Clear URL/Drive videos", key=f"clearurl_{i}"):
                     st.session_state.remote_videos[game] = []
                     st.info("Cleared remote videos for this game.")
-                    st.rerun()                                          # next run will clear before creating widget
+                    st.rerun()
 
             # --- ACTION BUTTONS ---
             st.markdown("### Actions")
@@ -1460,7 +1417,7 @@ for i, game in enumerate(GAMES):
                 except Exception as e:
                     st.exception(e)
                     st.error("Preflight failed. Check token and network.")
-            # Read-only connection check to confirm token, account, and campaign visibility
+
             if st.button("🔎 Check Facebook connection (read-only)", key=f"fbcheck_{i}"):
                 try:
                     result = test_fb_setup()
@@ -1630,16 +1587,17 @@ for i, game in enumerate(GAMES):
             }
         # --- Handle button actions after UI is drawn ---
         if cont:
-            # Combine browser uploads + server-downloaded URL videos
+            # Only use server-downloaded (Drive) videos now
             remote_list = st.session_state.remote_videos.get(game, [])
-            combined = (uploaded or []) + remote_list
+            combined = remote_list
 
             ok, msg = validate_count(combined)
             if not ok:
                 ok_msg_placeholder.error(msg)
             else:
                 try:
-                    st.session_state.uploads[game] = uploaded  # keep native uploads separately if you like
+                    # Save what we actually used so the summary table still works
+                    st.session_state.uploads[game] = combined
                     settings = st.session_state.settings.get(game, {})
                     plan = upload_to_facebook(game, combined, settings, simulate=dry_run)
                     def _render_summary(plan: dict, settings: dict, created: bool):
