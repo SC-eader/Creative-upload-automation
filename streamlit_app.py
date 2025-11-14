@@ -1035,32 +1035,32 @@ def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, 
         },
         "Dino Universe": {
             "campaign_id": "120203672340130431",
-            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
-            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "campaign_name": "ageofdinosaurs_aos_facebook_us_test_6th+",
+            "adset_prefix": "ageofdinosaurs_aos_facebook_us_test",
             "page_id": st.secrets["page_id_dino"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Snake Clash": {
             "campaign_id": "120201313657080615",
-            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
-            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "campaign_name": "linkedcubic_aos_facebook_us_test_14th above",
+            "adset_prefix": "linkedcubic_aos_facebook_us_test",
             "page_id": st.secrets["page_id_snake"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Pizza Ready": {
             "campaign_id": "120200161907250465",
-            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
-            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "campaign_name": "pizzaidle_aos_facebook_us_test_12th+",
+            "adset_prefix": "pizzaidle_aos_facebook_us_test",
             "page_id": st.secrets["page_id_pizza"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Cafe Life": {
             "campaign_id": "120231530818850361",
-            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
-            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "campaign_name": "cafelife_aos_facebook_us_creativetest",
+            "adset_prefix": "cafelife_aos_facebook_us_creativetest",
             "page_id": st.secrets["page_id_cafe"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Suzy's Restaurant": {
             "campaign_id": "120217220153800643",
-            "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
-            "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
+            "campaign_name": "suzyrest_aos_facebook_us_creativetest",
+            "adset_prefix": "suzyrest_aos_facebook_us_creativetest",
             "page_id": st.secrets["page_id_suzy"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Office Life": {
