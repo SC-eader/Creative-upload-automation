@@ -567,10 +567,10 @@ def _require_fb():
             f"Import error: {FB_IMPORT_ERROR}"
         )
 
-def init_fb_from_secrets() -> AdAccount:
+def init_fb_from_secrets(ad_account_id: str | None = None) -> AdAccount:
     """
-    Initialize the Meta SDK using ONLY the access token.
-    This avoids (#200) 'Provide valid app ID' when app_id/app_secret don't match the token.
+    Initialize the Meta SDK using ONLY the access token, and return an AdAccount.
+    If ad_account_id is None, fall back to the XP HERO ad account.
     """
     _require_fb()
     token = st.secrets.get("access_token", "").strip()
@@ -580,8 +580,10 @@ def init_fb_from_secrets() -> AdAccount:
     # Initialize with access token only (no app_id/app_secret)
     FacebookAdsApi.init(access_token=token)
 
-    # XP HERO ad account
-    return AdAccount("act_692755193188182")   # XP HERO ad account
+    # Default to XP HERO account if none is provided
+    default_act_id = "act_692755193188182"
+    act_id = ad_account_id or default_act_id
+    return AdAccount(act_id) # XP HERO ad account
 
 def next_nth_suffix(account: AdAccount, prefix: str) -> str:
     """Scan existing ad sets and return next ordinal like '35th' for a given prefix."""
@@ -1024,73 +1026,86 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
 
 def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, simulate: bool = False):
     """Create the chosen ad set and one paused ad per video (simulate=True returns plan only)."""
-    account = init_fb_from_secrets()
 
     mapping = {
         "XP HERO": {
+            "account_id": "act_692755193188182",
             "campaign_id": "120218934861590118",
             "campaign_name": "weaponrpg_aos_facebook_us_creativetest",
             "adset_prefix": "weaponrpg_aos_facebook_us_creativetest",
             "page_id": st.secrets["page_id_xp"],  # MUST be a Facebook Page ID, NOT the ad account ID
         },
         "Dino Universe": {
+            "account_id": "act_1400645283898971",  # <- put the Dino ad account here
             "campaign_id": "120203672340130431",
             "campaign_name": "ageofdinosaurs_aos_facebook_us_test_6th+",
             "adset_prefix": "ageofdinosaurs_aos_facebook_us_test",
-            "page_id": st.secrets["page_id_dino"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_dino"],
         },
         "Snake Clash": {
+            "account_id": "act_837301614677763",  # <- Snake account
             "campaign_id": "120201313657080615",
             "campaign_name": "linkedcubic_aos_facebook_us_test_14th above",
             "adset_prefix": "linkedcubic_aos_facebook_us_test",
-            "page_id": st.secrets["page_id_snake"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_snake"],
         },
         "Pizza Ready": {
+            "account_id": "act_939943337267153",  # <- Pizza account
             "campaign_id": "120200161907250465",
             "campaign_name": "pizzaidle_aos_facebook_us_test_12th+",
             "adset_prefix": "pizzaidle_aos_facebook_us_test",
-            "page_id": st.secrets["page_id_pizza"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_pizza"],
         },
         "Cafe Life": {
+            "account_id": "act_1425841598550220",  # cafe ad account
             "campaign_id": "120231530818850361",
             "campaign_name": "cafelife_aos_facebook_us_creativetest",
             "adset_prefix": "cafelife_aos_facebook_us_creativetest",
-            "page_id": st.secrets["page_id_cafe"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_cafe"],
         },
         "Suzy's Restaurant": {
+            "account_id": "act_953632226485498",  # suzy ad account
             "campaign_id": "120217220153800643",
             "campaign_name": "suzyrest_aos_facebook_us_creativetest",
             "adset_prefix": "suzyrest_aos_facebook_us_creativetest",
-            "page_id": st.secrets["page_id_suzy"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_suzy"],
         },
         "Office Life": {
+            "account_id": "act_733192439468531",  # office ad account
             "campaign_id": "120228464454680636",
             "campaign_name": "corporatetycoon_aos_facebook_us_creativetest",
             "adset_prefix": "corporatetycoon_aos_facebook_us_creativetest",
-            "page_id": st.secrets["page_id_office"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_office"],
         },
         "Lumber Chopper": {
+            "account_id": "act_1372896617079122",  # lumber ad account
             "campaign_id": "120224569359980144",
             "campaign_name": "lumberchopper_aos_facebook_us_creativetest",
             "adset_prefix": "lumberchopper_aos_facebook_us_creativetest",
-            "page_id": st.secrets["page_id_lumber"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_lumber"],
         },
         "Burger Please": {
+            "account_id": "act_3546175519039834",  # burger ad account
             "campaign_id": "120200361364790724",
             "campaign_name": "burgeridle_aos_facebook_us_test_30th+",
             "adset_prefix": "burgeridle_aos_facebook_us_test",
-            "page_id": st.secrets["page_id_burger"],  # MUST be a Facebook Page ID, NOT the ad account ID
+            "page_id": st.secrets["page_id_burger"],
         },
         "Prison Life": {
+            "account_id": "act_510600977962388",  # prison ad account
             "campaign_id": "120212520882120614",
             "campaign_name": "prison_aos_facebook_us_install_test",
             "adset_prefix": "prison_aos_facebook_us_install_test",
-            "page_id": st.secrets["page_id_prison"],  # MUST be a Facebook Page ID, NOT the ad account ID
-        }
+            "page_id": st.secrets["page_id_prison"],
+        },
     }
+
     if game_name not in mapping:
         raise ValueError(f"No FB mapping configured for game: {game_name}")
     cfg = mapping[game_name]
+
+    # ⬇️ NEW: initialize the correct ad account for this game
+    account = init_fb_from_secrets(cfg["account_id"])
       # --- Validate Page ID early and capture IG actor if present ---
     page_check = validate_page_binding(account, cfg["page_id"])
     # Optional: if user wants IG but Page has no IG actor, we can still run (we'll drop IG later).
