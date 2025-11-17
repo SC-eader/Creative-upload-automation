@@ -26,6 +26,8 @@ try:
 except ImportError:
     from drive_import import import_drive_folder_videos  # old signature: (folder_url_or_id) -> list[{"name","path"}]
     _DRIVE_IMPORT_SUPPORTS_PROGRESS = False
+from unity_ads import render_unity_settings_panel
+
 
 # ----- UI/Validation helpers --------------------------------------------------
 try:
@@ -1000,6 +1002,7 @@ def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, 
 # ----- Streamlit UI -----------------------------------------------------------
 
 st.set_page_config(page_title="Creative 자동 업로드", page_icon="🎮", layout="wide")
+
 st.title("🎮 Creative 자동 업로드")
 st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.")
 init_state()
@@ -1070,427 +1073,356 @@ _tabs = st.tabs(GAMES)
 
 for i, game in enumerate(GAMES):
     with _tabs[i]:
-        st.subheader(game)
-        left, right = st.columns([2, 1], gap="large")
+        # 전체 영역을 고정된 2열 레이아웃으로: 왼쪽(게임/Drive), 오른쪽(Settings)
+        left_col, right_col = st.columns([2, 1], gap="large")
 
-        # ----- LEFT: uploader + live preview + ACTIONS -----
-                # ----- LEFT: server-side videos + ACTIONS -----
-        with left:
-            # --- Import videos from Google Drive folder (server-side) ---
-            st.markdown("**구글 드라이브에서 Creative Videos를 가져옵니다**")
-            drv_input = st.text_input(
-                "Drive folder URL or ID",
-                key=f"drive_folder_{i}",
-                placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
-            )
+        # =========================
+        # LEFT COLUMN: 게임 이름 + 플랫폼 선택 + Drive/버튼들
+        # =========================
+                # =========================
+        # LEFT COLUMN: 게임 이름 + 플랫폼 선택 + Drive/버튼들
+        # =========================
+        with left_col:
+            left_card = st.container(border=True)
+            with left_card:
+                st.subheader(game)
 
-            # Advanced option: hidden by default
-            with st.expander("Advanced import options", expanded=False):
-                workers = st.number_input(
-                    "Parallel workers",
-                    min_value=1,
-                    max_value=16,
-                    value=6,
-                    key=f"drive_workers_{i}",
-                    help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
+                # --- Platform selector (Unity는 그대로 유지) ---
+                platform = st.radio(
+                    "플랫폼 선택",
+                    ["Facebook", "Unity Ads"],
+                    index=0,
+                    horizontal=True,
+                    key=f"platform_{i}",
                 )
 
-            if st.button("드라이브에서 Creative 가져오기", key=f"drive_import_{i}"):
-                try:
-                    overall = st.progress(0, text="0/0 • waiting…")
-                    log_box = st.empty()
-                    lines: List[str] = []
-                    imported_accum: List[Dict] = []
-
-                    import time
-                    last_flush = [0.0]  # <-- mutable holder instead of nonlocal
-
-                    def _on_progress(done: int, total: int, name: str, err: str | None):
-                        pct = int((done / max(total, 1)) * 100)
-                        label = f"{done}/{total}"
-                        if name:
-                            label += f" • {name}"
-                        if err:
-                            lines.append(f"❌ {name}  —  {err}")
-                        else:
-                            lines.append(f"✅ {name}")
-
-                        now = time.time()
-                        # Only update UI every ~0.3s or on final item
-                        if (now - last_flush[0]) > 0.3 or done == total:
-                            overall.progress(pct, text=label)
-                            log_box.write("\n".join(lines[-200:]))
-                            last_flush[0] = now
-
-                    with st.status("Importing videos from Drive folder...", expanded=True) as status:
-                        # Use the generic helper which already understands the parallel importer
-                        imported = _run_drive_import(
-                            drv_input,
-                            max_workers=int(workers),
-                            on_progress=_on_progress,
-                        )
-                        imported_accum.extend(imported)
-                        lst = st.session_state.remote_videos.get(game, [])
-                        lst.extend(imported_accum)
-                        st.session_state.remote_videos[game] = lst
-
-                        status.update(
-                            label=f"Drive import complete: {len(imported_accum)} file(s)",
-                            state="complete",
-                        )
-                        if isinstance(imported, dict) and imported.get("errors"):
-                            st.warning("Some files failed:\n- " + "\n- ".join(imported["errors"]))
-
-                    st.success(f"Imported {len(imported_accum)} video(s) from the folder.")
-                    if len(imported_accum) < 1:
-                        st.info("No eligible videos found. Check access, file types, or folder contents.")
-                except Exception as e:
-                    st.exception(e)
-                    st.error(
-                        "Could not import from this folder. "
-                        "Make sure your service account has access and the folder contains videos."
+                if platform == "Facebook":
+                    # --- Import videos from Google Drive folder (server-side) ---
+                    st.markdown("**구글 드라이브에서 Creative Videos를 가져옵니다**")
+                    drv_input = st.text_input(
+                        "Drive folder URL or ID",
+                        key=f"drive_folder_{i}",
+                        placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
                     )
-            # --- Shared list & clear button for all remote videos (URL + Drive) ---
-            remote_list = st.session_state.remote_videos.get(game, [])
-            if remote_list:
-                st.caption("다운로드된 Creatives:")
-                for it in remote_list[:50]:
-                    st.write("•", it["name"])
-                if st.button("업로드 초기화", key=f"clearurl_{i}"):
-                    st.session_state.remote_videos[game] = []
-                    st.info("Cleared remote videos for this game.")
-                    st.rerun()
 
-            ok_msg_placeholder = st.empty()
-            cont = st.button("Creative Test 업로드하기", key=f"continue_{i}")
-            clr = st.button("모든 게임 초기화", key=f"clear_{i}")
-
-        # ----- RIGHT: SETTINGS PANEL -----
-        with right:
-            ensure_settings_state()
-            st.markdown("### Settings")
-
-            cur = st.session_state.settings.get(game, {})
-
-        
-
-            # 1) 광고 세트 이름: campaign_name + "_nth"
-            suffix_number = st.number_input(
-                "광고 세트 접미사 n (…_nth)",
-                min_value=1,
-                step=1,
-                value=int(cur.get("suffix_number", 1)),
-                help="Ad set will be named as <campaign_name>_<n>th",
-                key=f"suffix_{i}",
-            )
-
-            # 2) 앱 홍보 - 스토어 선택 (기본: Google Play)
-            app_store = st.selectbox(
-                "모바일 앱 스토어",
-                ["Google Play 스토어", "Apple App Store"],
-                index=0 if cur.get("app_store", "Google Play 스토어") == "Google Play 스토어" else 1,
-                key=f"appstore_{i}",
-            )
-
-            # 3) 앱 연결 정보
-            fb_app_id = st.text_input(
-                "Facebook App ID",
-                value=cur.get("fb_app_id", ""),
-                key=f"fbappid_{i}",
-                help="설치 추적을 연결하려면 FB App ID를 입력하세요(선택).",
-            )
-            store_url = st.text_input(
-                "구글 스토어 URL",
-                value=cur.get("store_url", ""),
-                key=f"storeurl_{i}",
-                help="예) https://play.google.com/store/apps/details?id=... (쿼리스트링/트래킹 파라미터 제거 권장)",
-            )
-
-            # 4) 성과 목표 (기본: 앱 설치수 극대화)
-            opt_goal_label = st.selectbox(
-                "성과 목표",
-                list(OPT_GOAL_LABEL_TO_API.keys()),
-                index=list(OPT_GOAL_LABEL_TO_API.keys()).index(cur.get("opt_goal_label", "앱 설치수 극대화")),
-                key=f"optgoal_{i}",
-            )
-
-            # 5) 기여 설정 (표시용 안내)
-            st.caption("기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — Facebook에서 고정/제한될 수 있습니다.")
-
-            # 6) 예산 (per-video × 개수)
-            budget_per_video_usd = st.number_input(
-                "영상 1개당 일일 예산 (USD)",
-                min_value=1,
-                value=int(cur.get("budget_per_video_usd", 10)),
-                key=f"budget_per_video_{i}",
-                help="총 일일 예산 = (업로드/선택된 영상 수) × 이 값",
-            )
-
-            # 7) 예약 (기본: 토 00:00 → 월 12:00 KST)
-            default_start_iso, default_end_iso = next_sat_0000_and_mon_1200_kst()
-            start_iso = st.text_input(
-                "시작 날짜/시간 (ISO, KST)",
-                value=cur.get("start_iso", default_start_iso),
-                help="예: 2025-11-15T00:00:00+09:00",
-                key=f"start_{i}",
-            )
-            end_iso = st.text_input(
-                "종료 날짜/시간 (ISO, KST)",
-                value=cur.get("end_iso", default_end_iso),
-                help="예: 2025-11-17T12:00:00+09:00",
-                key=f"end_{i}",
-            )
-
-            # 8) 타겟 위치 (기본: United States)
-            country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
-
-            # 9) 최소 연령 (기본 18)
-            age_min = st.number_input(
-                "최소 연령",
-                min_value=13,
-                value=int(cur.get("age_min", 18)),
-                key=f"age_{i}",
-            )
-
-            # 10) OS/버전 (기본: Android only, 6.0+)
-            os_choice = st.selectbox(
-                "Target OS",
-                ["Both", "Android only", "iOS only"],
-                index={"Both": 0, "Android only": 1, "iOS only": 2}[cur.get("os_choice", "Android only")],
-                key=f"os_choice_{i}",
-            )
-
-            if os_choice in ("Both", "Android only"):
-                min_android_label = st.selectbox(
-                    "Min Android version",
-                    list(ANDROID_OS_CHOICES.keys()),
-                    index=list(ANDROID_OS_CHOICES.keys()).index(cur.get("min_android_label", "6.0+")),
-                    key=f"min_android_{i}",
-                )
-            else:
-                min_android_label = "None (any)"
-
-            if os_choice in ("Both", "iOS only"):
-                min_ios_label = st.selectbox(
-                    "Min iOS version",
-                    list(IOS_OS_CHOICES.keys()),
-                    index=list(IOS_OS_CHOICES.keys()).index(cur.get("min_ios_label", "None (any)")),
-                    key=f"min_ios_{i}",
-                )
-            else:
-                min_ios_label = "None (any)"
-
-            min_android_os_token = ANDROID_OS_CHOICES[min_android_label] if os_choice in ("Both", "Android only") else None
-            min_ios_os_token = IOS_OS_CHOICES[min_ios_label] if os_choice in ("Both", "iOS only") else None
-
-            # (선택) 광고 이름 규칙
-            ad_name_mode = st.selectbox(
-                "Ad name",
-                ["Use video filename", "Prefix + filename"],
-                index=1 if cur.get("ad_name_mode") == "Prefix + filename" else 0,
-                key=f"adname_mode_{i}",
-            )
-            ad_name_prefix = ""
-            if ad_name_mode == "Prefix + filename":
-                ad_name_prefix = st.text_input(
-                    "Ad name prefix",
-                    value=cur.get("ad_name_prefix", ""),
-                    key=f"adname_prefix_{i}",
-                )
-
-            # --- Save settings back into session_state ---
-            st.session_state.settings[game] = {
-                "suffix_number": int(suffix_number),
-                "app_store": app_store,
-                "fb_app_id": fb_app_id.strip(),
-                "store_url": store_url.strip(),
-                "opt_goal_label": opt_goal_label,
-                "budget_per_video_usd": int(budget_per_video_usd),
-                "start_iso": start_iso.strip(),
-                "end_iso": end_iso.strip(),
-                "country": (country or "US").strip(),
-                "age_min": int(age_min),
-                "os_choice": os_choice,
-                "min_android_label": min_android_label,
-                "min_ios_label": min_ios_label,
-                "min_android_os_token": min_android_os_token,
-                "min_ios_os_token": min_ios_os_token,
-                "ad_name_mode": ad_name_mode,
-                "ad_name_prefix": ad_name_prefix.strip(),
-                "game_key": game,
-            }
-        # --- Handle button actions after UI is drawn ---
-        if cont:
-            # Only use server-downloaded (Drive) videos now
-            remote_list = st.session_state.remote_videos.get(game, [])
-            combined = remote_list
-
-            ok, msg = validate_count(combined)
-            if not ok:
-                ok_msg_placeholder.error(msg)
-            else:
-                try:
-                    # Save what we actually used so the summary table still works
-                    st.session_state.uploads[game] = combined
-                    settings = st.session_state.settings.get(game, {})
-                    plan = upload_to_facebook(game, combined, settings) 
-                    def _render_summary(plan: dict, settings: dict, created: bool):
-                        """
-                        Render a styled summary card of the planned/created upload.
-                        Uses components_html (universal), falls back to st.markdown with unsafe HTML,
-                        and finally to a native Streamlit layout if HTML fails.
-                        """
-                        # ---- values ----
-                        if not isinstance(plan, dict):
-                            st.error("No plan data to display (upload did not return a plan).")
-                            return
-                        if settings is None:
-                            settings = {}
-                        store_url = (settings.get("store_url") or "").strip()
-                        fb_app_id = (settings.get("fb_app_id") or "").strip()
-                        per_video = int(settings.get("budget_per_video_usd", 10))
-                        os_choice = settings.get("os_choice", "Both")
-                        min_android = settings.get("min_android_label", "None (any)")
-                        min_ios = settings.get("min_ios_label", "None (any)")
-                        campaign_name = plan.get("campaign_name") or settings.get("campaign_name") or "—"
-                        app_store = plan.get("app_store") or settings.get("app_store") or "—"
-                        opt_goal_label = plan.get("opt_goal_label") or settings.get("opt_goal_label") or "앱 설치수 극대화"
-
-                        # Display-only fix: turn "..._1th" → "..._1st"
-                        def _ordinalize(adset_name: str) -> str:
-                            try:
-                                suffix = adset_name.rsplit("_", 1)[-1]
-                                n = int(suffix[:-2]) if suffix.endswith("th") else None
-                                if not n:
-                                    return adset_name
-                                def ord_suffix(k):
-                                    return "th" if 11 <= (k % 100) <= 13 else {1:"st", 2:"nd", 3:"rd"}.get(k % 10, "th")
-                                nice = f"{n}{ord_suffix(n)}"
-                                return adset_name[:-len(suffix)] + nice
-                            except Exception:
-                                return adset_name
-
-                        adset_name_disp = _ordinalize(plan.get("adset_name", "—"))
-
-                        # ---- build HTML once (BEFORE rendering) ----
-                        html = f"""
-                        <style>
-                        .summary-card {{ border:1px solid #e5e7eb; border-radius:12px; padding:16px 18px; background:#fff; }}
-                        .kv {{ display:grid; grid-template-columns: 200px 1fr; row-gap:8px; column-gap:14px; }}
-                        .label {{ color:#6b7280; font-weight:600; }}
-                        .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }}
-                        .chip {{ display:inline-block; background:#f3f4f6; border:1px solid #e5e7eb; border-radius:999px; padding:4px 10px; margin-right:6px; margin-bottom:6px; font-size:0.875rem; }}
-                        </style>
-                        <div class="summary-card">
-                        <div class="kv">
-                            <div class="label">Campaign</div><div class="mono">{campaign_name}</div>
-                            <div class="label">Campaign ID</div><div class="mono">{plan.get('campaign_id','—')}</div>
-                            <div class="label">Ad Set Name</div><div class="mono">{adset_name_disp}</div>
-
-                            <div class="label">App Store</div><div>{app_store}</div>
-                            <div class="label">Optimization Goal</div><div>{opt_goal_label}</div>
-
-                            <div class="label">Country/Age</div><div>{plan['country']} / {plan['age_min']}+</div>
-                            <div class="label">Budget (USD/day)</div>
-                            <div class="mono">${plan['budget_usd_per_day']} <span style="color:#6b7280;">(= ${per_video} × {plan['n_videos']} videos)</span></div>
-                            <div class="label">Schedule (KST)</div><div class="mono">{plan['start_iso']} → {plan['end_iso']}</div>
-
-                            <div class="label">OS Targeting</div>
-                            <div>
-                            <span class="chip">{os_choice}</span>
-                            <span class="chip">Android ≥ {min_android}</span>
-                            <span class="chip">iOS ≥ {min_ios}</span>
-                            </div>
-
-                            <div class="label"># of videos</div><div class="mono">{plan['n_videos']}</div>
-                            {f"<div class='label'>Store URL</div><div class='mono'>{store_url}</div>" if store_url else ""}
-                            {f"<div class='label'>Facebook App ID</div><div class='mono'>{fb_app_id}</div>" if fb_app_id else ""}
-                        </div>
-                        </div>
-                        """
-
-                        # ---- heading + creation note ----
-                        st.markdown("#### 📋 Creative Test Summary")
-                        if created and plan.get("adset_id"):
-                            st.success(f"Created Ad Set ID: `{plan['adset_id']}`")
-
-                        # ---- render: components_html → markdown(unsafe) → native fallback ----
-                        rendered = False
-                        try:
-                            components_html(html, height=360, scrolling=False)
-                            rendered = True
-                        except Exception:
-                            pass
-
-                        if not rendered:
-                            try:
-                                st.markdown(html, unsafe_allow_html=True)
-                                rendered = True
-                            except Exception:
-                                rendered = False
-
-                        if not rendered:
-                            # Native fallback (no HTML/CSS)
-                            def row(lbl, val):
-                                c1, c2 = st.columns([1, 3])
-                                with c1: st.caption(lbl)
-                                with c2: st.code(str(val), language=None)
-
-                            row("Campaign", campaign_name)
-                            row("Campaign ID", plan.get("campaign_id","—"))
-                            row("Ad Set Name", adset_name_disp)
-                            row("App Store", app_store)
-                            row("Optimization Goal", opt_goal_label)
-                            row("Country/Age", f"{plan['country']} / {plan['age_min']}+")
-                            row("Budget (USD/day)", f"${plan['budget_usd_per_day']} (= ${per_video} × {plan['n_videos']} videos)")
-                            row("Schedule (KST)", f"{plan['start_iso']} → {plan['end_iso']}")
-                            st.caption("OS Targeting")
-                            st.write(f"• {os_choice}")
-                            st.write(f"• Android ≥ {min_android}")
-                            st.write(f"• iOS ≥ {min_ios}")
-                            row("# of videos", plan['n_videos'])
-                            if store_url: row("Store URL", store_url)
-                            if fb_app_id: row("Facebook App ID", fb_app_id)
-
-                        # Ad names list
-                        if plan.get("ad_names"):
-                            with st.expander("Ad names to be created", expanded=False):
-                                for nm in plan["ad_names"]:
-                                    st.write("•", nm)
-
-                    # Always create (no dry run option)
-                    if isinstance(plan, dict) and plan.get("adset_id"):
-                        ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as PAUSED).")
-                        _render_summary(plan, settings, created=True)
-                    else:
-                        ok_msg_placeholder.error(
-                            "Meta upload did not return an ad set ID. "
-                            "Check the error above and your settings/permissions."
+                    # Advanced option: hidden by default
+                    with st.expander("Advanced import options", expanded=False):
+                        workers = st.number_input(
+                            "Parallel workers",
+                            min_value=1,
+                            max_value=16,
+                            value=6,
+                            key=f"drive_workers_{i}",
+                            help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
                         )
-                        if isinstance(plan, dict):
-                            _render_summary(plan, settings, created=False)
-                except Exception as e:
-                    import traceback
-                    st.exception(e)
-                    tb = traceback.format_exc()
-                    st.error("Meta upload failed. See full error below ⬇️")
-                    st.code(tb, language="python")
+
+                    if st.button("드라이브에서 Creative 가져오기", key=f"drive_import_{i}"):
+                        try:
+                            overall = st.progress(0, text="0/0 • waiting…")
+                            log_box = st.empty()
+                            lines: List[str] = []
+                            imported_accum: List[Dict] = []
+
+                            import time
+                            last_flush = [0.0]  # <-- mutable holder instead of nonlocal
+
+                            def _on_progress(done: int, total: int, name: str, err: str | None):
+                                pct = int((done / max(total, 1)) * 100)
+                                label = f"{done}/{total}"
+                                if name:
+                                    label += f" • {name}"
+                                if err:
+                                    lines.append(f"❌ {name}  —  {err}")
+                                else:
+                                    lines.append(f"✅ {name}")
+
+                                now = time.time()
+                                # Only update UI every ~0.3s or on final item
+                                if (now - last_flush[0]) > 0.3 or done == total:
+                                    overall.progress(pct, text=label)
+                                    log_box.write("\n".join(lines[-200:]))
+                                    last_flush[0] = now
+
+                            with st.status("Importing videos from Drive folder...", expanded=True) as status:
+                                imported = _run_drive_import(
+                                    drv_input,
+                                    max_workers=int(workers),
+                                    on_progress=_on_progress,
+                                )
+                                imported_accum.extend(imported)
+                                lst = st.session_state.remote_videos.get(game, [])
+                                lst.extend(imported_accum)
+                                st.session_state.remote_videos[game] = lst
+
+                                status.update(
+                                    label=f"Drive import complete: {len(imported_accum)} file(s)",
+                                    state="complete",
+                                )
+                                if isinstance(imported, dict) and imported.get("errors"):
+                                    st.warning("Some files failed:\n- " + "\n- ".join(imported["errors"]))
+
+                            st.success(f"Imported {len(imported_accum)} video(s) from the folder.")
+                            if len(imported_accum) < 1:
+                                st.info("No eligible videos found. Check access, file types, or folder contents.")
+                        except Exception as e:
+                            st.exception(e)
+                            st.error(
+                                "Could not import from this folder. "
+                                "Make sure your service account has access and the folder contains videos."
+                            )
+
+                    # --- Shared list & clear button for all remote videos (URL + Drive) ---
+                    remote_list = st.session_state.remote_videos.get(game, [])
+
+                    st.caption("다운로드된 Creatives:")
+                    if remote_list:
+                        for it in remote_list[:50]:
+                            st.write("•", it["name"])
+                    else:
+                        st.write("- (현재 저장된 URL/Drive 영상 없음)")
+
+                    # 🔹 URL/Drive 영상만 지우는 버튼 (항상 표시)
+                    if st.button("URL/Drive 영상만 초기화", key=f"clearurl_{i}"):
+                        if remote_list:
+                            st.session_state.remote_videos[game] = []
+                            st.info("Cleared URL/Drive videos for this game.")
+                            st.rerun()
+                        else:
+                            st.info("삭제할 URL/Drive 영상이 없습니다.")
+
+                    ok_msg_placeholder = st.empty()
+                    cont = st.button("Creative Test 업로드하기", key=f"continue_{i}")
+                    clr = st.button("전체 초기화", key=f"clear_{i}")
+
+                else:
+                    # =========================
+                    # UNITY ADS FLOW (placeholder 그대로 유지)
+                    # =========================
+                    st.markdown("### Unity Ads")
+                    st.info(
+                        "Unity Ads용 크리에이티브 테스트 플로우는 여기에서 동작하게 됩니다.\n\n"
+                        "- Unity Ads(ironSource) 광고주 계정\n"
+                        "- 각 게임의 Title ID, (선택) 기본 Campaign ID\n"
+                        "- Unity 서비스 계정(client_id / client_secret / org_id)\n"
+                        "을 st.secrets에 저장한 뒤 Facebook 플로우와 비슷하게 구현할 수 있어요."
+                    )
+                    st.caption("※ 현재는 설정/업로드 UI만 분리해 두었고, 실제 Unity API 연동은 아직 구현 전입니다.")
+
+        # =========================
+        # RIGHT COLUMN: Settings (Facebook 선택일 때만)
+        # =========================
+                # =========================
+        # RIGHT COLUMN: Settings (플랫폼별)
+        # =========================
+        if platform == "Facebook":
+            with right_col:
+                right_card = st.container(border=True)
+                with right_card:
+                    ensure_settings_state()
+
+                    # 🔹 게임 이름과 묶인 Settings 헤더
+                    st.markdown(f"### {game} Settings")
+
+                    cur = st.session_state.settings.get(game, {})
+
+                    # 1) 광고 세트 이름: campaign_name + "_nth"
+                    suffix_number = st.number_input(
+                        "광고 세트 접미사 n (…_nth)",
+                        min_value=1,
+                        step=1,
+                        value=int(cur.get("suffix_number", 1)),
+                        help="Ad set will be named as <campaign_name>_<n>th",
+                        key=f"suffix_{i}",
+                    )
+
+                    # 2) 앱 홍보 - 스토어 선택 (기본: Google Play)
+                    app_store = st.selectbox(
+                        "모바일 앱 스토어",
+                        ["Google Play 스토어", "Apple App Store"],
+                        index=0 if cur.get("app_store", "Google Play 스토어") == "Google Play 스토어" else 1,
+                        key=f"appstore_{i}",
+                    )
+
+                    # 3) 앱 연결 정보
+                    fb_app_id = st.text_input(
+                        "Facebook App ID",
+                        value=cur.get("fb_app_id", ""),
+                        key=f"fbappid_{i}",
+                        help="설치 추적을 연결하려면 FB App ID를 입력하세요(선택).",
+                    )
+                    store_url = st.text_input(
+                        "구글 스토어 URL",
+                        value=cur.get("store_url", ""),
+                        key=f"storeurl_{i}",
+                        help="예) https://play.google.com/store/apps/details?id=... (쿼리스트링/트래킹 파라미터 제거 권장)",
+                    )
+
+                    # 4) 성과 목표 (기본: 앱 설치수 극대화)
+                    opt_goal_label = st.selectbox(
+                        "성과 목표",
+                        list(OPT_GOAL_LABEL_TO_API.keys()),
+                        index=list(OPT_GOAL_LABEL_TO_API.keys()).index(cur.get("opt_goal_label", "앱 설치수 극대화")),
+                        key=f"optgoal_{i}",
+                    )
+
+                    # 5) 기여 설정 (표시용 안내)
+                    st.caption("기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — Facebook에서 고정/제한될 수 있습니다.")
+
+                    # 6) 예산 (per-video × 개수)
+                    budget_per_video_usd = st.number_input(
+                        "영상 1개당 일일 예산 (USD)",
+                        min_value=1,
+                        value=int(cur.get("budget_per_video_usd", 10)),
+                        key=f"budget_per_video_{i}",
+                        help="총 일일 예산 = (업로드/선택된 영상 수) × 이 값",
+                    )
+
+                    # 7) 예약 (기본: 토 00:00 → 월 12:00 KST)
+                    default_start_iso, default_end_iso = next_sat_0000_and_mon_1200_kst()
+                    start_iso = st.text_input(
+                        "시작 날짜/시간 (ISO, KST)",
+                        value=cur.get("start_iso", default_start_iso),
+                        help="예: 2025-11-15T00:00:00+09:00",
+                        key=f"start_{i}",
+                    )
+                    end_iso = st.text_input(
+                        "종료 날짜/시간 (ISO, KST)",
+                        value=cur.get("end_iso", default_end_iso),
+                        help="예: 2025-11-17T12:00:00+09:00",
+                        key=f"end_{i}",
+                    )
+
+                    # 8) 타겟 위치 (기본: United States)
+                    country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
+
+                    # 9) 최소 연령 (기본 18)
+                    age_min = st.number_input(
+                        "최소 연령",
+                        min_value=13,
+                        value=int(cur.get("age_min", 18)),
+                        key=f"age_{i}",
+                    )
+
+                    # 10) OS/버전 (기본: Android only, 6.0+)
+                    os_choice = st.selectbox(
+                        "Target OS",
+                        ["Both", "Android only", "iOS only"],
+                        index={"Both": 0, "Android only": 1, "iOS only": 2}[cur.get("os_choice", "Android only")],
+                        key=f"os_choice_{i}",
+                    )
+
+                    if os_choice in ("Both", "Android only"):
+                        min_android_label = st.selectbox(
+                            "Min Android version",
+                            list(ANDROID_OS_CHOICES.keys()),
+                            index=list(ANDROID_OS_CHOICES.keys()).index(cur.get("min_android_label", "6.0+")),
+                            key=f"min_android_{i}",
+                        )
+                    else:
+                        min_android_label = "None (any)"
+
+                    if os_choice in ("Both", "iOS only"):
+                        min_ios_label = st.selectbox(
+                            "Min iOS version",
+                            list(IOS_OS_CHOICES.keys()),
+                            index=list(IOS_OS_CHOICES.keys()).index(cur.get("min_ios_label", "None (any)")),
+                            key=f"min_ios_{i}",
+                        )
+                    else:
+                        min_ios_label = "None (any)"
+
+                    min_android_os_token = ANDROID_OS_CHOICES[min_android_label] if os_choice in ("Both", "Android only") else None
+                    min_ios_os_token = IOS_OS_CHOICES[min_ios_label] if os_choice in ("Both", "iOS only") else None
+
+                    # (선택) 광고 이름 규칙
+                    ad_name_mode = st.selectbox(
+                        "Ad name",
+                        ["Use video filename", "Prefix + filename"],
+                        index=1 if cur.get("ad_name_mode") == "Prefix + filename" else 0,
+                        key=f"adname_mode_{i}",
+                    )
+                    ad_name_prefix = ""
+                    if ad_name_mode == "Prefix + filename":
+                        ad_name_prefix = st.text_input(
+                            "Ad name prefix",
+                            value=cur.get("ad_name_prefix", ""),
+                            key=f"adname_prefix_{i}",
+                        )
+
+                    # --- Save settings back into session_state ---
+                    st.session_state.settings[game] = {
+                        "suffix_number": int(suffix_number),
+                        "app_store": app_store,
+                        "fb_app_id": fb_app_id.strip(),
+                        "store_url": store_url.strip(),
+                        "opt_goal_label": opt_goal_label,
+                        "budget_per_video_usd": int(budget_per_video_usd),
+                        "start_iso": start_iso.strip(),
+                        "end_iso": end_iso.strip(),
+                        "country": (country or "US").strip(),
+                        "age_min": int(age_min),
+                        "os_choice": os_choice,
+                        "min_android_label": min_android_label,
+                        "min_ios_label": min_ios_label,
+                        "min_android_os_token": min_android_os_token,
+                        "min_ios_os_token": min_ios_os_token,
+                        "ad_name_mode": ad_name_mode,
+                        "ad_name_prefix": ad_name_prefix.strip(),
+                        "game_key": game,
+                    }
+
+        elif platform == "Unity Ads":
+            # 👉 Unity용 설정 패널도 테두리 카드 안에 렌더링
+            with right_col:
+                unity_card = st.container(border=True)
+                render_unity_settings_panel(unity_card, game, i)
+
+        # --- Handle button actions after BOTH columns are drawn (Facebook only) ---
+        if platform == "Facebook":
+            if cont:
+                # Only use server-downloaded (Drive) videos now
+                remote_list = st.session_state.remote_videos.get(game, [])
+                combined = remote_list
+
+                ok, msg = validate_count(combined)
+                if not ok:
+                    ok_msg_placeholder.error(msg)
+                else:
+                    try:
+                        st.session_state.uploads[game] = combined
+                        settings = st.session_state.settings.get(game, {})
+                        plan = upload_to_facebook(game, combined, settings)
+
+                        # (기존 _render_summary 정의 및 사용 그대로 유지)
+                        def _render_summary(plan: dict, settings: dict, created: bool):
+                            ...
+                        if isinstance(plan, dict) and plan.get("adset_id"):
+                            ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as PAUSED).")
+                            _render_summary(plan, settings, created=True)
+                        else:
+                            ok_msg_placeholder.error(
+                                "Meta upload did not return an ad set ID. "
+                                "Check the error above and your settings/permissions."
+                            )
+                            if isinstance(plan, dict):
+                                _render_summary(plan, settings, created=False)
+                    except Exception as e:
+                        import traceback
+                        st.exception(e)
+                        tb = traceback.format_exc()
+                        st.error("Meta upload failed. See full error below ⬇️")
+                        st.code(tb, language="python")
+
+            if clr:
+                st.session_state.uploads.pop(game, None)
+                st.session_state.remote_videos.pop(game, None)
+                st.session_state.settings.pop(game, None)
+                st.session_state[f"clear_uploader_flag_{i}"] = True
+                ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
+                st.rerun()
 
 
-        if clr:
-            # Clear saved data for this game
-            st.session_state.uploads.pop(game, None)
-            st.session_state.remote_videos.pop(game, None)  # also clear URL/Drive videos
-            st.session_state.settings.pop(game, None)
 
-            # Mark the uploader to be cleared on the NEXT run,
-            # BEFORE the widget is created again.
-            st.session_state[f"clear_uploader_flag_{i}"] = True
-
-            ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
-            st.rerun()
-
-st.divider()
 
 # Summary table
 st.subheader("업로드 완료된 게임")
