@@ -1077,7 +1077,7 @@ for i, game in enumerate(GAMES):
                 # ----- LEFT: server-side videos + ACTIONS -----
         with left:
             # --- Import videos from Google Drive folder (server-side) ---
-            st.markdown("**Import all videos from a Google Drive folder (server-side)**")
+            st.markdown("**구글 드라이브에서 Creative Videos를 가져옵니다**")
             drv_input = st.text_input(
                 "Drive folder URL or ID",
                 key=f"drive_folder_{i}",
