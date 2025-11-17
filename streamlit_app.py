@@ -27,7 +27,7 @@ except ImportError:
     from drive_import import import_drive_folder_videos  # old signature: (folder_url_or_id) -> list[{"name","path"}]
     _DRIVE_IMPORT_SUPPORTS_PROGRESS = False
 from unity_ads import render_unity_settings_panel
-
+VERBOSE_UPLOAD_LOG = False
 
 # ----- UI/Validation helpers --------------------------------------------------
 try:
@@ -382,7 +382,7 @@ def upload_videos_create_ads(
     adset_id: str,
     uploaded_files: list,
     ad_name_prefix: str | None = None,
-    max_workers_save: int = 4,
+    max_workers_save: int = 6,
     store_url: str | None = None,
     try_instagram: bool = True,
 ):
@@ -521,7 +521,11 @@ def upload_videos_create_ads(
                 new_start = int(tr.get("start_offset", start_offset + to_read))
                 new_end   = int(tr.get("end_offset", end_offset))
 
-                st.write(f"[Upload] Sent [{start_offset},{end_offset}) → ack: start={new_start}, end={new_end}, sent={sent_bytes}/{file_size}")
+                if VERBOSE_UPLOAD_LOG:
+                    st.write(
+                        f"[Upload] Sent [{start_offset},{end_offset}) → "
+                        f"ack: start={new_start}, end={new_end}, sent={sent_bytes}/{file_size}"
+                    )
 
                 start_offset, end_offset = new_start, new_end
 

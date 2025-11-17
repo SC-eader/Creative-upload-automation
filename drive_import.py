@@ -94,7 +94,7 @@ def download_drive_file_to_tmp(service, file_id: str, filename_hint: Optional[st
         path = tmp.name
     fh = open(path, "wb")
     try:
-        downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024)
+        downloader = MediaIoBaseDownload(fh, request, chunksize=8*1024 * 1024)
         done = False
         attempt = 0
         while not done:
