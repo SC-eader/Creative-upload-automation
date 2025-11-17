@@ -764,9 +764,22 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
         start_iso, end_iso = next_sat_0000_and_mon_1200_kst()
 
     # Ad set suffix: user-selected n
+        # Ad set suffix: user-selected n
     n = int(settings.get("suffix_number") or 1)
     suffix_str = f"{n}th"
-    adset_name = f"{adset_prefix}_{suffix_str}"
+
+    # Optional: add launch date (start_iso) as YYYYmmdd, e.g. _35th_20251122
+    launch_date_suffix = ""
+    if settings.get("add_launch_date"):
+        try:
+            # start_iso is already the launch Saturday 00:00 KST from settings or default
+            dt = datetime.fromisoformat(start_iso)
+            launch_date_suffix = "_" + dt.strftime("%Y%m%d")
+        except Exception:
+            # If parsing fails, just skip the date suffix
+            launch_date_suffix = ""
+
+    adset_name = f"{adset_prefix}_{suffix_str}{launch_date_suffix}"
 
     # Videos (local + any server-downloaded)
     allowed = {".mp4", ".mpeg4"}
@@ -1226,13 +1239,22 @@ for i, game in enumerate(GAMES):
                     cur = st.session_state.settings.get(game, {})
 
                     # 1) 광고 세트 이름: campaign_name + "_nth"
+                                        # 1) 광고 세트 이름: campaign_name + "_nth"
                     suffix_number = st.number_input(
-                        "광고 세트 접미사 n (…_nth)",
+                        "광고 세트 접미사 n(…_nth)",
                         min_value=1,
                         step=1,
                         value=int(cur.get("suffix_number", 1)),
-                        help="Ad set will be named as <campaign_name>_<n>th",
+                        help="Ad set will be named as <campaign_name>_<n>th or <campaign_name>_<n>th_YYYYmmdd",
                         key=f"suffix_{i}",
+                    )
+
+                    # 선택: 시작 날짜(launch Saturday)의 YYYYmmdd를 광고 세트 이름에 추가
+                    add_launch_date = st.checkbox(
+                        "Launch 날짜 추가",
+                        value=bool(cur.get("add_launch_date", False)),
+                        key=f"add_launch_date_{i}",
+                        help="예: weaponrpg_aos_facebook_us_creativetest_35th_20251122",
                     )
 
                     # 2) 앱 홍보 - 스토어 선택 (기본: Google Play)
@@ -1352,6 +1374,7 @@ for i, game in enumerate(GAMES):
                     # --- Save settings back into session_state ---
                     st.session_state.settings[game] = {
                         "suffix_number": int(suffix_number),
+                        "add_launch_date": bool(add_launch_date),
                         "app_store": app_store,
                         "fb_app_id": fb_app_id.strip(),
                         "store_url": store_url.strip(),
