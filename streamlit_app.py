@@ -1,22 +1,8 @@
-"""
-Streamlit UI: 10 games, each with an upload area that expects 10–12 creative files.
-
-Run:
-  streamlit run streamlit_app.py
-# Tip: for better Google Drive reliability, install gdown:
-#   pip install gdown
-# If absent, we still try direct downloads with robust retries.
-
-Notes:
-- Supported files: JPG/PNG/MP4 (tweak below).
-f"- Each tab accepts **video files only**: {', '.join(t.upper() for t in accepted_types)} (limit {MAX_UPLOAD_MB}MB per file)."- "Creative Test 업로드하기" creates a (paused) ad set + ads via Meta Marketing API using per-title settings.
-"""
-
+"""Streamlit app: bulk upload per-game videos from Drive and create Meta creative tests."""
 from __future__ import annotations
 
 import os
 from typing import Dict, List
-import io
 from datetime import datetime, timedelta, timezone
 import tempfile
 import logging
@@ -29,7 +15,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 import requests
 import pathlib
-from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
@@ -103,94 +88,6 @@ def validate_count(files: List) -> tuple[bool, str]:
         )
     return True, f"{len(files)} video(s) ready."
 
-def ext(fname: str) -> str:
-    """Return lowercase file extension including the dot (e.g., '.jpg')."""
-    return os.path.splitext(fname)[1].lower()
-
-def test_fb_setup() -> dict:
-    """Quick read-only check: account info and presence of the XP HERO campaign."""
-    acct = init_fb_from_secrets()
-    info = acct.api_get(fields=["name", "account_status", "currency"])
-    has_ct = False
-    for c in acct.get_campaigns(fields=["id","name"], params={"limit": 200}):
-        if c.get("id") == "120218934861590118":
-            has_ct = True
-            break
-    return {"account": info, "creative_test_campaign_found": has_ct}
-
-def debug_fb_identity() -> dict:
-    """
-    Minimal identity check with the current token.
-    Returns {'me': {id,name}, 'account': {name,currency}} without using app creds.
-    """
-    _require_fb()
-    from facebook_business.adobjects.user import User
-
-    me = User(fbid="me").api_get(fields=["id", "name"])
-    acct = AdAccount("act_692755193188182").api_get(fields=["name", "currency"])
-
-    return {"me": {"id": me["id"], "name": me["name"]}, "account": {"name": acct["name"], "currency": acct["currency"]}}
-
-# --- Friendly FB error helper ---
-def _friendly_fb_error(e: Exception) -> str:
-    """
-    Turn common Marketing API errors into actionable guidance.
-    Returns a short HTML string for st.markdown(..., unsafe_allow_html=True).
-    """
-    try:
-        from facebook_business.exceptions import FacebookRequestError
-        if isinstance(e, FacebookRequestError):
-            code = getattr(e, "api_error_code", lambda: None)()
-            sub = getattr(e, "api_error_subcode", lambda: None)()
-            msg = getattr(e, "api_error_message", lambda: "")()
-
-            # Permission errors
-            if code == 200 and sub == 1815066:
-                return (
-                    "<b>Permission error (code 200 / subcode 1815066)</b><br/>"
-                    "이 광고계정에서 광고를 <b>생성</b>할 권한이 없습니다.<br/><br/>"
-                    "<b>해결 방법</b><ol>"
-                    "<li>Business Settings → Ad Accounts → <code>act_692755193188182</code> → People → "
-                    "당신(또는 시스템 사용자)에게 <b>Advertiser</b> 이상 권한 부여</li>"
-                    "<li>액세스 토큰에 <code>ads_management</code> 포함 및 자산 연결 확인</li>"
-                    "<li>해당 Page가 이 광고계정과 Connected assets로 연결</li>"
-                    "<li>앱 Live / 비즈니스 인증 & 2FA 확인</li>"
-                    "</ol>"
-                    f"<div style='color:#6b7280'>Raw: {msg}</div>"
-                )
-
-            # Invalid Page ID inside object_story_spec (your current case)
-            if code == 100 and sub == 1443120:
-                return (
-                    "<b>Page ID error (code 100 / subcode 1443120)</b><br/>"
-                    "object_story_spec.page_id 로 <b>광고계정 ID</b>가 전달되었습니다.<br/>"
-                    "<b>해결 방법</b><ol>"
-                    "<li><code>page_id</code> 에는 <b>Facebook Page ID</b> 를 넣으세요 (예: 1xxxxxxxxxxxxxx).</li>"
-                    "<li><code>act_...</code> 또는 그 숫자만 전달하면 안 됩니다.</li>"
-                    "<li>토큰/비즈니스 자산 연결로 그 Page 에 접근 가능한지도 확인하세요.</li>"
-                    "</ol>"
-                    f"<div style='color:#6b7280'>Raw: {msg}</div>"
-                )
-
-            if code == 200:
-                return (
-                    "<b>Permission error</b> — 토큰 권한/자산 연결을 확인하세요.<br/>"
-                    f"<div style='color:#6b7280'>Raw: {msg} (code={code}, subcode={sub})</div>"
-                )
-    except Exception:
-        pass
-    return "Meta API call failed. Check token scopes, ad account role, Page/ad account connections, and payload."
-def list_manageable_pages() -> list[dict]:
-    """Return [{'id': '<PAGE_ID>', 'name': '<Page Name>'}] for Pages this token can access."""
-    _require_fb()
-    from facebook_business.adobjects.user import User
-    token = (st.secrets.get("access_token") or "").strip()
-    if not token:
-        raise RuntimeError("Missing access_token in st.secrets")
-    # FacebookAdsApi.init already called in init_fb_from_secrets when needed
-    pages = User(fbid="me").get_accounts(fields=["id", "name"], params={"limit": 500})
-    return [{"id": p["id"], "name": p["name"]} for p in pages]
-
 def validate_page_binding(account, page_id: str) -> dict:
     """
     Ensure page_id is numeric, readable by token, and fetch IG actor (if any).
@@ -204,59 +101,14 @@ def validate_page_binding(account, page_id: str) -> dict:
     try:
         p = Page(pid).api_get(fields=["id", "name", "instagram_business_account"])
     except Exception as e:
-        raise RuntimeError(f"Page validation failed for PAGE_ID={pid}. Use a real Facebook Page ID and ensure the token can read it.") from e
+        raise RuntimeError(
+            f"Page validation failed for PAGE_ID={pid}. "
+            "Use a real Facebook Page ID and ensure the token can read it."
+        ) from e
     iba = (p.get("instagram_business_account") or {}).get("id")
     return {"id": p["id"], "name": p["name"], "instagram_business_account_id": iba}
 
 
-def preflight_permissions(target_act_id: str, page_id: str | None = None) -> dict:
-    """
-    Read-only checks to verify that the current token can CREATE in the target ad account.
-    Returns a dict with diagnostic info and pass/fail booleans.
-    """
-    _require_fb()
-    from facebook_business.adobjects.user import User
-    from facebook_business.adobjects.adaccount import AdAccount
-
-    me = User(fbid="me").api_get(fields=["id", "name"])
-    # Fetch ad accounts the token can see + listed permissions strings
-    adaccts = User(fbid="me").get_ad_accounts(
-        fields=["id", "name", "account_status", "permissions"], params={"limit": 500}
-    )
-    acct_rows = [a for a in adaccts]
-    acct_map = {a["id"]: a for a in acct_rows}
-
-    have_target = target_act_id in acct_map
-    perm_list = (acct_map.get(target_act_id, {}).get("permissions") or []) if have_target else []
-    # Creation requires at least ADVERTISE (or ADMIN)
-    can_create = any(p in ("ADVERTISE", "ADMIN") for p in perm_list)
-
-    page_ok = None
-    if page_id:
-        try:
-            # Minimal probe: can we read page? (If not, system user/page asset may be missing)
-            from facebook_business.adobjects.page import Page
-            _p = Page(page_id).api_get(fields=["id", "name"])
-            page_ok = True if _p and _p.get("id") else False
-        except Exception:
-            page_ok = False
-
-    return {
-        "me": {"id": me["id"], "name": me["name"]},
-        "target_account_seen": have_target,
-        "target_permissions": perm_list,
-        "can_create_in_target": bool(can_create),
-        "page_access_ok": page_ok,
-        "adaccounts_overview": [
-            {
-                "id": a.get("id"),
-                "name": a.get("name"),
-                "status": a.get("account_status"),
-                "permissions": a.get("permissions"),
-            }
-            for a in acct_rows
-        ],
-    }
 def _fname_any(u):
     """Return a filename for either a Streamlit UploadedFile or a {'name','path'} dict."""
     return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
@@ -430,127 +282,6 @@ def make_ad_name(filename: str, prefix: str | None) -> str:
     """Build ad name from filename and optional prefix."""
     return f"{prefix.strip()}_{filename}" if prefix else filename
 
-def _normalize_drive_url(url: str) -> str:
-    """Turn common Google Drive share links into direct-download links."""
-    url = url.strip()
-    if "drive.google.com/file/d/" in url:
-        try:
-            file_id = url.split("/file/d/")[1].split("/")[0]
-            return f"https://drive.google.com/uc?export=download&id={file_id}"
-        except Exception:
-            return url
-    return url
-
-def fetch_url_to_tmp(url: str, timeout: int = 900) -> dict:
-    """
-    Download a remote video URL to a temp file and return {'name': str, 'path': str}.
-    - Retries with exponential backoff on transient network/SSL/server errors.
-    - Smaller chunk size to reduce TLS buffer errors on some CDNs.
-    - Google Drive fallback via gdown for large files / confirm tokens.
-    """
-    import tempfile, pathlib, time
-    import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-
-    def _direct_download(u: str) -> tuple[str, str]:
-        sess = requests.Session()
-        # robust retry policy
-        retry = Retry(
-            total=5,
-            connect=5,
-            read=5,
-            backoff_factor=1.5,
-            status_forcelist=(429, 500, 502, 503, 504),
-            allowed_methods=frozenset(["GET", "HEAD"]),
-            raise_on_status=False,
-        )
-        sess.mount("http://", HTTPAdapter(max_retries=retry))
-        sess.mount("https://", HTTPAdapter(max_retries=retry))
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; CreativeUploader/1.0)",
-            "Accept": "*/*",
-            "Accept-Encoding": "identity",  # avoid gzip chunking oddities on some CDNs
-            "Connection": "keep-alive",
-        }
-
-        # follow redirects; separate connect/read timeouts
-        with sess.get(u, headers=headers, stream=True, timeout=(10, timeout), allow_redirects=True) as r:
-            r.raise_for_status()
-            ctype = r.headers.get("Content-Type", "").lower()
-            disp = r.headers.get("Content-Disposition", "")
-            # filename
-            name = None
-            if "filename=" in disp:
-                name = disp.split("filename=")[-1].strip(' \'"')
-            if not name:
-                name = u.split("?")[0].rstrip("/").split("/")[-1] or "video.mp4"
-            # ensure extension when content-type says video
-            if not name.lower().endswith((".mp4", ".mpeg4")) and ("video" in ctype or "mp4" in ctype):
-                name = f"{name}.mp4"
-            # quick sanity
-            if not ("video" in ctype or name.lower().endswith((".mp4", ".mpeg4"))):
-                raise ValueError(f"URL is not a video. Content-Type={ctype!r}")
-
-            # write to tmp in smaller chunks (256KB)
-            suffix = pathlib.Path(name).suffix.lower() or ".mp4"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                for chunk in r.iter_content(chunk_size=256 * 1024):
-                    if chunk:
-                        tmp.write(chunk)
-                local_path = tmp.name
-
-        return pathlib.Path(name).name, local_path
-
-    def _maybe_gdrive(u: str) -> tuple[str, str] | None:
-        # Use gdown for Drive links (handles confirm prompts/large files/throttling)
-        try:
-            from urllib.parse import urlparse
-            netloc = urlparse(u).netloc.lower()
-            if "drive.google.com" not in netloc:
-                return None
-            try:
-                import gdown  # type: ignore
-            except Exception:
-                return None  # gdown not installed; skip
-            # gdown will figure out id/confirm; fuzzy handles various link shapes
-            import tempfile
-            out_fd, out_path = tempfile.mkstemp(suffix=".mp4")
-            os.close(out_fd)
-            ok = gdown.download(url=u, output=out_path, quiet=True, fuzzy=True)
-            if not ok:
-                return None
-            # pick a decent display name
-            name = u.split("?")[0].rstrip("/").split("/")[-1] or "video.mp4"
-            if not name.lower().endswith((".mp4", ".mpeg4")):
-                name += ".mp4"
-            return name, out_path
-        except Exception:
-            return None
-
-    # Normalize common Drive share link
-    url = _normalize_drive_url(url)
-
-    # Try Drive-specialized path first (if applicable)
-    gd = _maybe_gdrive(url)
-    if gd:
-        name, path = gd
-        return {"name": name, "path": path}
-
-    # Otherwise use robust direct downloader with retries
-    last_err = None
-    for attempt in range(1, 6):
-        try:
-            name, path = _direct_download(url)
-            return {"name": name, "path": path}
-        except Exception as e:
-            last_err = e
-            # small sleep with backoff
-            time.sleep(min(2 * attempt, 10))
-
-    raise RuntimeError(f"Download failed after retries: {last_err}")
-
 # ----- Meta (Facebook) Marketing API wiring ----------------------------------
 
 try:
@@ -591,18 +322,6 @@ def init_fb_from_secrets(ad_account_id: str | None = None) -> AdAccount:
     default_act_id = "act_692755193188182"
     act_id = ad_account_id or default_act_id
     return AdAccount(act_id) # XP HERO ad account
-
-def next_nth_suffix(account: AdAccount, prefix: str) -> str:
-    """Scan existing ad sets and return next ordinal like '35th' for a given prefix."""
-    ordinals = []
-    for a in account.get_ad_sets(fields=["name"], params={"limit": 200}):
-        n = a.get("name", "")
-        if n.startswith(prefix) and n.split("_")[-1].endswith("th"):
-            try:
-                ordinals.append(int(n.split("_")[-1].replace("th", "")))
-            except ValueError:
-                pass
-    return f"{(max(ordinals) + 1) if ordinals else 1}th"
 
 def create_creativetest_adset(
     account: AdAccount,
@@ -824,44 +543,63 @@ def upload_videos_create_ads(
             v = account.create_ad_video(params={"file": path, "content_category": "VIDEO_GAMING"})
             return v["id"]
 
-    def wait_until_video_ready(video_id: str, *, timeout_s: int = 300, sleep_s: int = 5) -> bool:
+    def wait_all_videos_ready(video_ids: list[str], *, timeout_s: int = 300, sleep_s: int = 5) -> dict[str, bool]:
         """
-        Poll the uploaded AdVideo until it's usable. v24 exposes 'status' only.
-        Returns True if we observe a ready-ish status before timeout.
-        Defensive: if timeout_s <= 0 (misconfig), default to 300s to avoid spam loops.
+        Poll ALL uploaded AdVideos together until each is ready or timeout.
+        Returns {video_id: True/False} indicating whether each ID became 'ready'.
         """
         from time import sleep, time
         from facebook_business.adobjects.advideo import AdVideo
 
-        if timeout_s is None:
-            timeout_s = 300  # guard against 0-second timeouts
+        if timeout_s is None or timeout_s <= 0:
+            timeout_s = 300  # guard against misconfig
 
         READY = {"ready", "processed", "finished", "available", "live", "published"}
         start = time()
-        last = None
+        remaining = set(video_ids)
+        last_status: dict[str, str | None] = {vid: None for vid in video_ids}
 
-        # Compact, bounded polling — no repeated Streamlit warnings on every rerun
-        while time() - start < timeout_s:
-            try:
-                v = AdVideo(video_id).api_get(fields=["status"])
-                status = v.get("status")
-                s = status if isinstance(status, str) else (
-                    (status or {}).get("video_status")
-                    or (status or {}).get("processing_phase")
-                    or (status or {}).get("status")
-                )
-                last = s
-                if isinstance(s, str) and s.lower() in READY:
-                    st.write(f"[Encode] Video {video_id} ready: {s}")
-                    return True
-            except Exception as e:
-                # Silent backoff; asset propagation can 404/4xx transiently
-                last = getattr(e, "args", [str(e)])[0]
+        if not video_ids:
+            return {}
 
-            sleep(sleep_s)
+        progress = st.progress(0, text="Encoding videos on Meta…")
 
-        st.info(f"[Encode] Video {video_id} not confirmed ready within {timeout_s}s (last={last}). Proceeding.")
-        return False
+        while remaining and (time() - start) < timeout_s:
+            completed = len(video_ids) - len(remaining)
+
+            for vid in list(remaining):
+                try:
+                    v = AdVideo(vid).api_get(fields=["status"])
+                    status = v.get("status")
+                    s = status if isinstance(status, str) else (
+                        (status or {}).get("video_status")
+                        or (status or {}).get("processing_phase")
+                        or (status or {}).get("status")
+                    )
+                    last_status[vid] = s
+                    if isinstance(s, str) and s.lower() in READY:
+                        remaining.remove(vid)
+                        completed += 1
+                except Exception as e:
+                    # Treat transient read errors as "not ready yet"
+                    last_status[vid] = getattr(e, "args", [str(e)])[0]
+
+            pct = int((completed / max(len(video_ids), 1)) * 100)
+            progress.progress(pct, text=f"Encoding {completed}/{len(video_ids)} videos…")
+
+            if remaining:
+                sleep(sleep_s)
+
+        progress.empty()
+
+        # Log any that never reached a "ready" state
+        for vid in remaining:
+            st.info(
+                f"[Encode] Video {vid} not confirmed ready within {timeout_s}s "
+                f"(last={last_status.get(vid)!r}). Proceeding anyway."
+            )
+
+        return {vid: (vid not in remaining) for vid in video_ids}
 
     def resolve_instagram_actor_id(page_id: str) -> str | None:
         """
@@ -903,26 +641,56 @@ def upload_videos_create_ads(
         # ---------- Stage 2: API calls ----------
     # Phase A) Upload all videos first (no waiting yet)
     uploads, api_errors = [], []
-    for item in persisted:  
+    total = len(persisted)
+    progress = st.progress(0, text=f"Uploading 0/{total} videos…") if total else None
+
+    def _upload_one(item):
+        """Upload a single video file to Meta and return its info."""
         name, path = item["name"], item["path"]
-        try:
-            vid = upload_video_resumable(path)
-            uploads.append({"name": name, "path": path, "video_id": vid, "ready": False})
-            st.write(f"⬆️ Uploaded {name} → video_id={vid}")
-        except Exception as e:
-            api_errors.append(f"{name}: upload failed: {e}")
+        vid = upload_video_resumable(path)
+        return {"name": name, "path": path, "video_id": vid}
+
+    done = 0
+    if total:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=max_workers_save) as ex:
+            future_to_item = {ex.submit(_upload_one, item): item for item in persisted}
+            for fut in as_completed(future_to_item):
+                item = future_to_item[fut]
+                name = item["name"]
+                try:
+                    res = fut.result()
+                    res["ready"] = False
+                    uploads.append(res)
+                    done += 1
+                    if progress is not None:
+                        pct = int(done / total * 100)
+                        progress.progress(pct, text=f"Uploading {done}/{total} videos…")
+                except Exception as e:
+                    api_errors.append(f"{name}: upload failed: {e}")
+
 
     # Phase B) Poll all videos concurrently (round-robin) with a single progress bar
 
     # Phase C) Create creatives & ads
+        # Phase C) Create creatives & ads
     results = []
+
+    # ✅ NEW: wait for ALL uploaded videos together (batch) instead of one-by-one
+    video_ids = [u["video_id"] for u in uploads]
+    ready_map = wait_all_videos_ready(video_ids, timeout_s=300, sleep_s=5)
+
     for up in uploads:
         name, video_id = up["name"], up["video_id"]
 
-        # ✅ Wait up to 300s for this specific video to be ready
-        wait_until_video_ready(video_id, timeout_s=300, sleep_s=5)
+        if not ready_map.get(video_id, False):
+            st.info(
+                f"[Encode] Proceeding with {name} (video_id={video_id}) "
+                "even though encoding was not fully confirmed."
+            )
 
-        # --- START FIX: Fetch the auto-generated thumbnail ---
+        # --- START FIX: Add image_url to video_data ---
         try:
             # 'picture' is the field for the default thumbnail URL
             video_info = AdVideo(video_id).api_get(fields=["picture"])
@@ -931,30 +699,34 @@ def upload_videos_create_ads(
                 raise RuntimeError("Video processed but no 'picture' (thumbnail) URL was returned.")
         except Exception as e:
             api_errors.append(f"{name}: Failed to fetch thumbnail: {e}")
-            continue # Skip this video, move to the next
+            continue  # Skip this video, move to the next
         # --- END FIX ---
 
-
         def _create_once(allow_ig: bool) -> str:
-            
             # --- START FIX: Add image_url to video_data ---
             vd = {
                 "video_id": video_id,
                 "title": name,
                 "message": "",
-                "image_url": thumbnail_url  # Add the thumbnail URL here
+                "image_url": thumbnail_url,  # Add the thumbnail URL here
             }
             # --- END FIX ---
 
             if store_url:
-                # This 'store_url' variable is passed into the function
-                vd["call_to_action"] = {"type": "INSTALL_MOBILE_APP", "value": {"link": store_url}}
-            
+                vd["call_to_action"] = {
+                    "type": "INSTALL_MOBILE_APP",
+                    "value": {"link": store_url},
+                }
+
             spec = {"page_id": page_id, "video_data": vd}
-            
+
             if allow_ig and ig_actor_id:
                 spec["instagram_actor_id"] = ig_actor_id
-            creative = account.create_ad_creative(fields=[], params={"name": name, "object_story_spec": spec})
+
+            creative = account.create_ad_creative(
+                fields=[],
+                params={"name": name, "object_story_spec": spec},
+            )
             ad = account.create_ad(
                 fields=[],
                 params={
@@ -970,7 +742,6 @@ def upload_videos_create_ads(
             try:
                 ad_id = _create_once(True)
             except FacebookRequestError as e:
-                # If IG or not-ready issues, retry once without IG after a short wait
                 msg = (e.api_error_message() or "").lower()
                 if "instagram" in msg or "not ready" in msg or "processing" in msg:
                     time.sleep(5)
@@ -980,11 +751,6 @@ def upload_videos_create_ads(
             results.append({"name": name, "ad_id": ad_id})
         except Exception as e:
             api_errors.append(f"{name}: creative/ad failed: {e}")
-
-    if api_errors:
-        st.error("Some ads failed to create:\n- " + "\n- ".join(api_errors))
-
-    return results
 
 
 def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, page_id: str, uploaded_files: list, settings: dict) -> dict:
@@ -1235,14 +1001,7 @@ def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, 
 
 st.set_page_config(page_title="Creative 자동 업로드", page_icon="🎮", layout="wide")
 st.title("🎮 Creative 자동 업로드")
-st.caption("Collect, validate, and upload creatives per game with configurable settings.")
-
-with st.expander("🔧 Debug: server upload settings", expanded=False):
-    try:
-        st.write("server.maxUploadSize =", st.get_option("server.maxUploadSize"))
-        st.write("server.maxMessageSize =", st.get_option("server.maxMessageSize"))
-    except Exception as e:
-        st.write("Could not read options:", e)
+st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.")
 init_state()
 init_remote_state()
 
@@ -1257,7 +1016,7 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.ageofdinosaurs",
     },
     "Snake Clash": {
-        "fb_app_id": "102629376270269",
+        "fb_app_id": "1205179980183812",
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.linkedcubic",
     },
     "Pizza Ready": {
@@ -1273,19 +1032,19 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=com.corestudiso.suzyrest",
     },
     "Office Life": {
-        "fb_app_id": "562244766249471",
+        "fb_app_id": "1570824996873176",
         "store_url": "https://play.google.com/store/apps/details?id=com.funreal.corporatetycoon",
     },
     "Lumber Chopper": {
-        "fb_app_id": "729295830272629",
+        "fb_app_id": "2824067207774178",
         "store_url": "https://play.google.com/store/apps/details?id=dasi.prs2.lumberchopper",
     },
     "Burger Please": {
-        "fb_app_id": "729295830272629",
+        "fb_app_id": "2967105673598896",
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.burgeridle",
     },
     "Prison Life": {
-        "fb_app_id": "368211056367446",
+        "fb_app_id": "6564765833603067",
         "store_url": "https://play.google.com/store/apps/details?id=io.supercent.prison",
     },
 }
@@ -1306,16 +1065,6 @@ GAMES = game_tabs(NUM_GAMES)
 
 accepted_types = ["mp4", "mpeg4"]
 
-# Global notes panel
-with st.expander("How this works", expanded=True):
-    st.markdown(
-        f"- There are **{NUM_GAMES}** tabs.\n"
-        f"- Each tab accepts **video files only**: {', '.join(t.upper() for t in accepted_types)}.\n"
-        f"- There is **no limit** on the number of videos you can upload per tab.\n"
-        "- Use the Settings panel to customize targeting and schedule per game.\n"
-        "- Click **Creative Test 업로드하기** to create a paused ad set + ads on Meta (or Dry run to preview).\n"
-        "- Use **Clear** to remove previously saved uploads/settings for that game."
-    )
 
 _tabs = st.tabs(GAMES)
 
@@ -1334,14 +1083,27 @@ for i, game in enumerate(GAMES):
                 key=f"drive_folder_{i}",
                 placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
             )
-            workers = st.number_input("Parallel workers", 1, 8, value=3, key=f"drive_workers_{i}")
 
-            if st.button("Import videos from folder", key=f"drive_import_{i}"):
+            # Advanced option: hidden by default
+            with st.expander("Advanced import options", expanded=False):
+                workers = st.number_input(
+                    "Parallel workers",
+                    min_value=1,
+                    max_value=16,
+                    value=6,
+                    key=f"drive_workers_{i}",
+                    help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
+                )
+
+            if st.button("드라이브에서 Creative 가져오기", key=f"drive_import_{i}"):
                 try:
                     overall = st.progress(0, text="0/0 • waiting…")
                     log_box = st.empty()
                     lines: List[str] = []
                     imported_accum: List[Dict] = []
+
+                    import time
+                    last_flush = [0.0]  # <-- mutable holder instead of nonlocal
 
                     def _on_progress(done: int, total: int, name: str, err: str | None):
                         pct = int((done / max(total, 1)) * 100)
@@ -1352,21 +1114,30 @@ for i, game in enumerate(GAMES):
                             lines.append(f"❌ {name}  —  {err}")
                         else:
                             lines.append(f"✅ {name}")
-                        overall.progress(pct, text=label)
-                        # keep last ~200 lines visible
-                        log_box.write("\n".join(lines[-200:]))
+
+                        now = time.time()
+                        # Only update UI every ~0.3s or on final item
+                        if (now - last_flush[0]) > 0.3 or done == total:
+                            overall.progress(pct, text=label)
+                            log_box.write("\n".join(lines[-200:]))
+                            last_flush[0] = now
 
                     with st.status("Importing videos from Drive folder...", expanded=True) as status:
-                        from drive_import import import_drive_folder_videos_parallel
-                        imported = import_drive_folder_videos_parallel(
-                            drv_input, max_workers=int(workers), on_progress=_on_progress
+                        # Use the generic helper which already understands the parallel importer
+                        imported = _run_drive_import(
+                            drv_input,
+                            max_workers=int(workers),
+                            on_progress=_on_progress,
                         )
                         imported_accum.extend(imported)
                         lst = st.session_state.remote_videos.get(game, [])
                         lst.extend(imported_accum)
                         st.session_state.remote_videos[game] = lst
-                        # finalize status
-                        status.update(label=f"Drive import complete: {len(imported_accum)} file(s)", state="complete")
+
+                        status.update(
+                            label=f"Drive import complete: {len(imported_accum)} file(s)",
+                            state="complete",
+                        )
                         if isinstance(imported, dict) and imported.get("errors"):
                             st.warning("Some files failed:\n- " + "\n- ".join(imported["errors"]))
 
@@ -1379,57 +1150,20 @@ for i, game in enumerate(GAMES):
                         "Could not import from this folder. "
                         "Make sure your service account has access and the folder contains videos."
                     )
-
             # --- Shared list & clear button for all remote videos (URL + Drive) ---
             remote_list = st.session_state.remote_videos.get(game, [])
             if remote_list:
-                st.caption("Server-downloaded videos:")
+                st.caption("다운로드된 Creatives:")
                 for it in remote_list[:50]:
                     st.write("•", it["name"])
-                if st.button("Clear URL/Drive videos", key=f"clearurl_{i}"):
+                if st.button("업로드 초기화", key=f"clearurl_{i}"):
                     st.session_state.remote_videos[game] = []
                     st.info("Cleared remote videos for this game.")
                     st.rerun()
 
-            # --- ACTION BUTTONS ---
-            st.markdown("### Actions")
-            dry_run = st.checkbox("Dry run (no API writes)", value=True, key=f"dryrun_{i}")
-
-            if st.button("🔍 Preflight: permissions & token", key=f"preflight_{i}"):
-                try:
-                    acct = "act_692755193188182"
-                    page = st.secrets.get("page_id", "")
-                    diag = preflight_permissions(acct, page)
-                    st.success(f"Token belongs to: {diag['me']['name']} ({diag['me']['id']})")
-
-                    c1, c2, c3 = st.columns([1,1,1])
-                    with c1: st.metric("Sees target ad account", "Yes" if diag["target_account_seen"] else "No")
-                    with c2: st.metric("Can create in target", "Yes" if diag["can_create_in_target"] else "No")
-                    with c3: st.metric("Page access OK", "-" if diag["page_access_ok"] is None else ("Yes" if diag["page_access_ok"] else "No"))
-
-                    st.caption("Permissions on target ad account")
-                    st.code(", ".join(diag["target_permissions"]) or "(none)", language=None)
-
-                    with st.expander("All ad accounts visible to this token", expanded=False):
-                        for row in diag["adaccounts_overview"]:
-                            st.write(f"- {row['id']} — {row['name']} (status={row['status']})")
-                            st.write("  permissions:", ", ".join(row.get("permissions") or []))
-                except Exception as e:
-                    st.exception(e)
-                    st.error("Preflight failed. Check token and network.")
-
-            if st.button("🔎 Check Facebook connection (read-only)", key=f"fbcheck_{i}"):
-                try:
-                    result = test_fb_setup()
-                    st.success(f"Account: {result['account']['name']} | Currency: {result['account']['currency']}")
-                    st.write("Creative test campaign present:", result["creative_test_campaign_found"])
-                except Exception as e:
-                    st.exception(e)
-                    st.error("Facebook connection failed. See error above.")
-
             ok_msg_placeholder = st.empty()
             cont = st.button("Creative Test 업로드하기", key=f"continue_{i}")
-            clr = st.button("업로드 파일 초기화", key=f"clear_{i}")
+            clr = st.button("모든 게임 초기화", key=f"clear_{i}")
 
         # ----- RIGHT: SETTINGS PANEL -----
         with right:
@@ -1599,7 +1333,7 @@ for i, game in enumerate(GAMES):
                     # Save what we actually used so the summary table still works
                     st.session_state.uploads[game] = combined
                     settings = st.session_state.settings.get(game, {})
-                    plan = upload_to_facebook(game, combined, settings, simulate=dry_run)
+                    plan = upload_to_facebook(game, combined, settings) 
                     def _render_summary(plan: dict, settings: dict, created: bool):
                         """
                         Render a styled summary card of the planned/created upload.
@@ -1724,21 +1458,17 @@ for i, game in enumerate(GAMES):
                                 for nm in plan["ad_names"]:
                                     st.write("•", nm)
 
-                    if dry_run:
-                        ok_msg_placeholder.info("Dry run only — nothing was created.")
-                        _render_summary(plan, settings, created=False)
+                    # Always create (no dry run option)
+                    if isinstance(plan, dict) and plan.get("adset_id"):
+                        ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as PAUSED).")
+                        _render_summary(plan, settings, created=True)
                     else:
-                        # Success only if we got a valid dict and adset_id
-                        if isinstance(plan, dict) and plan.get("adset_id"):
-                            ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as PAUSED).")
-                            _render_summary(plan, settings, created=True)
-                        else:
-                            ok_msg_placeholder.error(
-                                "Meta upload did not return an ad set ID. "
-                                "Check the error above and your settings/permissions."
-                            )
-                            if isinstance(plan, dict):
-                                _render_summary(plan, settings, created=False)
+                        ok_msg_placeholder.error(
+                            "Meta upload did not return an ad set ID. "
+                            "Check the error above and your settings/permissions."
+                        )
+                        if isinstance(plan, dict):
+                            _render_summary(plan, settings, created=False)
                 except Exception as e:
                     import traceback
                     st.exception(e)
@@ -1763,12 +1493,12 @@ for i, game in enumerate(GAMES):
 st.divider()
 
 # Summary table
-st.subheader("Summary")
+st.subheader("업로드 완료된 게임")
 if st.session_state.uploads:
-    data = {"Game": [], "Files Saved": []}
+    data = {"게임": [], "업로드 파일": []}
     for g, files in st.session_state.uploads.items():
-        data["Game"].append(g)
-        data["Files Saved"].append(len(files))
+        data["게임"].append(g)
+        data["업로드 파일"].append(len(files))
     st.dataframe(data, hide_index=True)
 else:
-    st.info("No uploads saved yet. Go to a tab and click **Continue** after uploading.")
+    st.info("No uploads saved yet. Go to a tab and click **Creative Test 업로드하기** after importing videos.")
