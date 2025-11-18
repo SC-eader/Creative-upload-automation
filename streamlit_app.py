@@ -778,7 +778,7 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
         try:
             # start_iso is already the launch Saturday 00:00 KST from settings or default
             dt = datetime.fromisoformat(start_iso)
-            launch_date_suffix = "_" + dt.strftime("%Y%m%d")
+            launch_date_suffix = "_" + dt.strftime("%y%m%d")
         except Exception:
             # If parsing fails, just skip the date suffix
             launch_date_suffix = ""
@@ -1128,7 +1128,7 @@ for i, game in enumerate(GAMES):
                             "Parallel workers",
                             min_value=1,
                             max_value=16,
-                            value=6,
+                            value=8,
                             key=f"drive_workers_{i}",
                             help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
                         )

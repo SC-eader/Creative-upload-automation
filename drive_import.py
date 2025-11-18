@@ -94,7 +94,7 @@ def download_drive_file_to_tmp(service, file_id: str, filename_hint: Optional[st
         path = tmp.name
     fh = open(path, "wb")
     try:
-        downloader = MediaIoBaseDownload(fh, request, chunksize=8*1024 * 1024)
+        downloader = MediaIoBaseDownload(fh, request, chunksize=16*1024 * 1024)
         done = False
         attempt = 0
         while not done:
@@ -120,7 +120,7 @@ def download_drive_file_to_tmp(service, file_id: str, filename_hint: Optional[st
 
 def import_drive_folder_videos_parallel(
     folder_url_or_id: str,
-    max_workers: int = 4,
+    max_workers: int = 6,
     on_progress: Optional[Callable[[int, int, str, Optional[str]], None]] = None,
 ) -> List[Dict]:
     """
