@@ -382,7 +382,7 @@ def upload_videos_create_ads(
     adset_id: str,
     uploaded_files: list,
     ad_name_prefix: str | None = None,
-    max_workers_save: int = 6,
+    max_workers: int = 6,  # <-- Renamed from max_workers_save for clarity
     store_url: str | None = None,
     try_instagram: bool = True,
 ):
@@ -578,7 +578,7 @@ def upload_videos_create_ads(
     # ---------- Stage 1: persist to temp (parallel I/O only) ----------
     persisted, persist_errors = [], []
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=max_workers_save) as ex:
+    with ThreadPoolExecutor(max_workers=max_workers) as ex: # <-- Use max_workers
         futs = {ex.submit(_persist_to_tmp, u): _fname_any(u) for u in videos}
         for fut, nm in futs.items():
             try:
@@ -600,8 +600,7 @@ def upload_videos_create_ads(
     if try_instagram and not ig_actor_id:
         ig_actor_id = resolve_instagram_actor_id(page_id)
 
-    # ---------- Stage 2: API calls (serial) ----------
-        # ---------- Stage 2: API calls ----------
+    # ---------- Stage 2: API calls ----------
     # Phase A) Upload all videos first (no waiting yet)
     uploads, api_errors = [], []
     total = len(persisted)
@@ -617,7 +616,7 @@ def upload_videos_create_ads(
     if total:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=max_workers_save) as ex:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex: # <-- Use max_workers
             future_to_item = {ex.submit(_upload_one, item): item for item in persisted}
             for fut in as_completed(future_to_item):
                 item = future_to_item[fut]
@@ -632,88 +631,146 @@ def upload_videos_create_ads(
                         progress.progress(pct, text=f"Uploading {done}/{total} videos…")
                 except Exception as e:
                     api_errors.append(f"{name}: upload failed: {e}")
+    
+    if progress:
+        progress.empty() # Clear upload progress bar
 
 
     # Phase B) Poll all videos concurrently (round-robin) with a single progress bar
+    # (Skipped by FAST-PATH)
 
     # Phase C) Create creatives & ads
-        # Phase C) Create creatives & ads
     results = []
 
     # ✅ NEW: wait for ALL uploaded videos together (batch) instead of one-by-one
     video_ids = [u["video_id"] for u in uploads]
     ready_map = wait_all_videos_ready(video_ids, timeout_s=300, sleep_s=5)
 
-    for up in uploads:
+    # =======================================================================
+    # START: 🚀 NEW PARALLEL CREATION LOGIC
+    # =======================================================================
+    
+    def _process_one_video(up):
+        """
+        Helper to fetch thumbnail, create creative, and create ad for one video.
+        This will be run in a thread.
+        """
+        # We must import these here for thread safety with the SDK
+        from facebook_business.adobjects.advideo import AdVideo
+        from facebook_business.adobjects.adcreative import AdCreative
+        from facebook_business.adobjects.ad import Ad
+        from facebook_business.exceptions import FacebookRequestError
+        import time
+
         name, video_id = up["name"], up["video_id"]
 
-        if not ready_map.get(video_id, False):
-            st.info(
-                f"[Encode] Proceeding with {name} (video_id={video_id}) "
-                "even though encoding was not fully confirmed."
-            )
-
-        # --- START FIX: Add image_url to video_data ---
         try:
-            # 'picture' is the field for the default thumbnail URL
+            # --- Fetch thumbnail ---
             video_info = AdVideo(video_id).api_get(fields=["picture"])
             thumbnail_url = video_info.get("picture")
             if not thumbnail_url:
                 raise RuntimeError("Video processed but no 'picture' (thumbnail) URL was returned.")
-        except Exception as e:
-            api_errors.append(f"{name}: Failed to fetch thumbnail: {e}")
-            continue  # Skip this video, move to the next
-        # --- END FIX ---
 
-        def _create_once(allow_ig: bool) -> str:
-            # --- START FIX: Add image_url to video_data ---
-            vd = {
-                "video_id": video_id,
-                "title": name,
-                "message": "",
-                "image_url": thumbnail_url,  # Add the thumbnail URL here
-            }
-            # --- END FIX ---
-
-            if store_url:
-                vd["call_to_action"] = {
-                    "type": "INSTALL_MOBILE_APP",
-                    "value": {"link": store_url},
+            # --- Internal create helper (copied from original loop) ---
+            def _create_once(allow_ig: bool) -> str:
+                vd = {
+                    "video_id": video_id,
+                    "title": name,
+                    "message": "",
+                    "image_url": thumbnail_url,
                 }
 
-            spec = {"page_id": page_id, "video_data": vd}
+                if store_url:
+                    vd["call_to_action"] = {
+                        "type": "INSTALL_MOBILE_APP",
+                        "value": {"link": store_url},
+                    }
 
-            if allow_ig and ig_actor_id:
-                spec["instagram_actor_id"] = ig_actor_id
+                spec = {"page_id": page_id, "video_data": vd}
 
-            creative = account.create_ad_creative(
-                fields=[],
-                params={"name": name, "object_story_spec": spec},
-            )
-            ad = account.create_ad(
-                fields=[],
-                params={
-                    "name": make_ad_name(name, ad_name_prefix),
-                    "adset_id": adset_id,
-                    "creative": {"creative_id": creative["id"]},
-                    "status": Ad.Status.paused,
-                },
-            )
-            return ad["id"]
+                if allow_ig and ig_actor_id:
+                    spec["instagram_actor_id"] = ig_actor_id
 
-        try:
+                creative = account.create_ad_creative(
+                    fields=[],
+                    params={"name": name, "object_story_spec": spec},
+                )
+                ad = account.create_ad(
+                    fields=[],
+                    params={
+                        "name": make_ad_name(name, ad_name_prefix),
+                        "adset_id": adset_id,
+                        "creative": {"creative_id": creative["id"]},
+                        "status": Ad.Status.paused,
+                    },
+                )
+                return ad["id"]
+
+            # --- Try/Except logic (copied from original loop) ---
             try:
                 ad_id = _create_once(True)
             except FacebookRequestError as e:
                 msg = (e.api_error_message() or "").lower()
                 if "instagram" in msg or "not ready" in msg or "processing" in msg:
-                    time.sleep(5)
+                    time.sleep(5) # Sleep is fine, it's in a thread
                     ad_id = _create_once(False)
                 else:
                     raise
-            results.append({"name": name, "ad_id": ad_id})
+            
+            # Return success
+            return {"success": True, "result": {"name": name, "ad_id": ad_id}}
+
         except Exception as e:
-            api_errors.append(f"{name}: creative/ad failed: {e}")
+            # Return failure
+            return {"success": False, "error": f"{name}: creative/ad failed: {e}"}
+
+    # --- NEW: Run _process_one_video in a ThreadPool ---
+    total_c = len(uploads)
+    progress_c = st.progress(0, text=f"Creating 0/{total_c} ads…") if total_c else None
+    done_c = 0
+
+    if total_c:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as ex: # <-- Use max_workers
+            future_to_video = {ex.submit(_process_one_video, up): up for up in uploads}
+            
+            for fut in as_completed(future_to_video):
+                res = fut.result()
+                
+                done_c += 1
+                if progress_c:
+                    pct = int(done_c / total_c * 100)
+                    progress_c.progress(pct, text=f"Creating {done_c}/{total_c} ads…")
+
+                if res["success"]:
+                    results.append(res["result"])
+                else:
+                    api_errors.append(res["error"])
+    
+    if progress_c:
+        progress_c.empty()
+
+    # =======================================================================
+    # END: 🚀 NEW PARALLEL CREATION LOGIC
+    # =======================================================================
+
+    # The old serial loop (from line 790 to 862) is now replaced
+    # by the ThreadPoolExecutor block above.
+
+    # --- Cleanup & Return ---
+    if progress:
+        progress.empty()
+
+    # Log errors to the UI
+    if api_errors:
+        st.error(
+            f"{len(api_errors)} video(s) failed during creation:\n"
+            + "\n".join(f"- {e}" for e in api_errors[:20])
+            + ("\n..." if len(api_errors) > 20 else "")
+        )
+    
+    return results
 
 
 def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, page_id: str, uploaded_files: list, settings: dict) -> dict:
