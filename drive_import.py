@@ -16,10 +16,61 @@ from google.oauth2.service_account import Credentials
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 def get_drive_service_from_secrets():
-    """Create an authenticated Drive API client using service-account JSON from st.secrets."""
-    info = dict(st.secrets["gcp_service_account"])
+    """
+    Create an authenticated Drive API client using service-account credentials.
+
+    Priority:
+      1) st.secrets["gcp_service_account"]  (if present)
+      2) GOOGLE_CREDENTIALS or GCP_SERVICE_ACCOUNT_JSON env var (full JSON)
+      3) GOOGLE_APPLICATION_CREDENTIALS env var (path to JSON key file)
+    """
+    import json
+    import os
+
+    info = None
+
+    # 1) Try st.secrets safely (no KeyError)
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = dict(st.secrets["gcp_service_account"])
+    except Exception:
+        # st.secrets may not exist outside Streamlit runtime
+        pass
+
+    # 2) Try JSON in environment variable
+    if info is None:
+        env_json = os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GCP_SERVICE_ACCOUNT_JSON")
+        if env_json:
+            try:
+                info = json.loads(env_json)
+            except Exception as e:
+                raise RuntimeError(
+                    "GOOGLE_CREDENTIALS / GCP_SERVICE_ACCOUNT_JSON is set "
+                    "but could not be parsed as JSON."
+                ) from e
+
+    # 3) Try path in GOOGLE_APPLICATION_CREDENTIALS
+    if info is None:
+        cred_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if cred_path:
+            if not os.path.isfile(cred_path):
+                raise RuntimeError(
+                    f"GOOGLE_APPLICATION_CREDENTIALS is set to '{cred_path}', "
+                    "but that file does not exist."
+                )
+            creds = Credentials.from_service_account_file(cred_path, scopes=DRIVE_SCOPES)
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    if info is None:
+        raise RuntimeError(
+            "No Google service account credentials found.\n"
+            "- Either set st.secrets['gcp_service_account'] in secrets.toml, or\n"
+            "- Export GOOGLE_CREDENTIALS / GCP_SERVICE_ACCOUNT_JSON with the JSON content, or\n"
+            "- Export GOOGLE_APPLICATION_CREDENTIALS with the path to the JSON key file."
+        )
+
+    # If we got info (from st.secrets or env JSON), build the client from it
     creds = Credentials.from_service_account_info(info, scopes=DRIVE_SCOPES)
-    # cache_discovery=False avoids file writes in some environments
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 def extract_drive_folder_id(url_or_id: str) -> str:
