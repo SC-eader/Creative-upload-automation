@@ -488,12 +488,14 @@ def upload_videos_create_ads(
             while True:
                 # Done only when both offsets == file_size (server has everything)
                 if start_offset == end_offset == file_size:
-                    st.write(f"[Upload] ✅ All bytes acknowledged ({sent_bytes}/{file_size}).")
+                    if VERBOSE_UPLOAD_LOG:
+                        st.write(f"[Upload] ✅ All bytes acknowledged ({sent_bytes}/{file_size}).")
                     break
 
                 # If Graph returns a stall window (no progress yet), ask again (no file chunk)
                 if end_offset <= start_offset:
-                    st.write(f"[Upload] ↻ Asking for next window at {start_offset}")
+                    if VERBOSE_UPLOAD_LOG:
+                        st.write(f"[Upload] ↻ Asking for next window at {start_offset}")
                     tr = _post({
                         "upload_phase": "transfer",
                         "upload_session_id": upload_session_id,
@@ -551,61 +553,16 @@ def upload_videos_create_ads(
 
     def wait_all_videos_ready(video_ids: list[str], *, timeout_s: int = 300, sleep_s: int = 5) -> dict[str, bool]:
         """
-        Poll ALL uploaded AdVideos together until each is ready or timeout.
-        Returns {video_id: True/False} indicating whether each ID became 'ready'.
+        FAST-PATH: skip polling AdVideo.status.
+
+        We assume Meta will finish encoding in the background and immediately
+        proceed to creative/ad creation. This removes the extra "Encoding..." wait
+        and significantly speeds up the end-to-end flow.
+
+        Returns {video_id: True} for all provided IDs so the rest of the pipeline
+        can run unchanged.
         """
-        from time import sleep, time
-        from facebook_business.adobjects.advideo import AdVideo
-
-        if timeout_s is None or timeout_s <= 0:
-            timeout_s = 300  # guard against misconfig
-
-        READY = {"ready", "processed", "finished", "available", "live", "published"}
-        start = time()
-        remaining = set(video_ids)
-        last_status: dict[str, str | None] = {vid: None for vid in video_ids}
-
-        if not video_ids:
-            return {}
-
-        progress = st.progress(0, text="Encoding videos on Meta…")
-
-        while remaining and (time() - start) < timeout_s:
-            completed = len(video_ids) - len(remaining)
-
-            for vid in list(remaining):
-                try:
-                    v = AdVideo(vid).api_get(fields=["status"])
-                    status = v.get("status")
-                    s = status if isinstance(status, str) else (
-                        (status or {}).get("video_status")
-                        or (status or {}).get("processing_phase")
-                        or (status or {}).get("status")
-                    )
-                    last_status[vid] = s
-                    if isinstance(s, str) and s.lower() in READY:
-                        remaining.remove(vid)
-                        completed += 1
-                except Exception as e:
-                    # Treat transient read errors as "not ready yet"
-                    last_status[vid] = getattr(e, "args", [str(e)])[0]
-
-            pct = int((completed / max(len(video_ids), 1)) * 100)
-            progress.progress(pct, text=f"Encoding {completed}/{len(video_ids)} videos…")
-
-            if remaining:
-                sleep(sleep_s)
-
-        progress.empty()
-
-        # Log any that never reached a "ready" state
-        for vid in remaining:
-            st.info(
-                f"[Encode] Video {vid} not confirmed ready within {timeout_s}s "
-                f"(last={last_status.get(vid)!r}). Proceeding anyway."
-            )
-
-        return {vid: (vid not in remaining) for vid in video_ids}
+        return {vid: True for vid in (video_ids or [])}
 
     def resolve_instagram_actor_id(page_id: str) -> str | None:
         """
