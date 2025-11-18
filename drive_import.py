@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
-
+#export GOOGLE_APPLICATION_CREDENTIALS="/Users/you/Downloads/roas-test-456808-321ce7426bfb.json"
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 def get_drive_service_from_secrets():
@@ -145,7 +145,7 @@ def download_drive_file_to_tmp(service, file_id: str, filename_hint: Optional[st
         path = tmp.name
     fh = open(path, "wb")
     try:
-        downloader = MediaIoBaseDownload(fh, request, chunksize=16*1024 * 1024)
+        downloader = MediaIoBaseDownload(fh, request, chunksize=32*1024 * 1024)
         done = False
         attempt = 0
         while not done:

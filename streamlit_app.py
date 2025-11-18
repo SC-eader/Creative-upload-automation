@@ -26,7 +26,11 @@ try:
 except ImportError:
     from drive_import import import_drive_folder_videos  # old signature: (folder_url_or_id) -> list[{"name","path"}]
     _DRIVE_IMPORT_SUPPORTS_PROGRESS = False
-from unity_ads import render_unity_settings_panel
+from unity_ads import (
+    render_unity_settings_panel,
+    get_unity_settings,
+    upload_unity_creatives_to_campaign,
+)
 VERBOSE_UPLOAD_LOG = False
 
 # ----- UI/Validation helpers --------------------------------------------------
@@ -1062,7 +1066,7 @@ GAME_DEFAULTS = {
         "store_url": "https://play.google.com/store/apps/details?id=com.fireshrike.h2",
     },
     "Suzy's Restaurant": {
-        "fb_app_id": "608844445639579",
+        "fb_app_id": "836273807918279",
         "store_url": "https://play.google.com/store/apps/details?id=com.corestudiso.suzyrest",
     },
     "Office Life": {
@@ -1227,17 +1231,23 @@ for i, game in enumerate(GAMES):
 
                 else:
                     # =========================
-                    # UNITY ADS FLOW (placeholder 그대로 유지)
+                    # UNITY ADS FLOW
                     # =========================
                     st.markdown("### Unity Ads")
-                    st.info(
-                        "Unity Ads용 크리에이티브 테스트 플로우는 여기에서 동작하게 됩니다.\n\n"
-                        "- Unity Ads(ironSource) 광고주 계정\n"
-                        "- 각 게임의 Title ID, (선택) 기본 Campaign ID\n"
-                        "- Unity 서비스 계정(client_id / client_secret / org_id)\n"
-                        "을 st.secrets에 저장한 뒤 Facebook 플로우와 비슷하게 구현할 수 있어요."
-                    )
-                    st.caption("※ 현재는 설정/업로드 UI만 분리해 두었고, 실제 Unity API 연동은 아직 구현 전입니다.")
+
+                    remote_list = st.session_state.remote_videos.get(game, []) or []
+                    st.caption("다운로드된 Creatives (Unity에 업로드 예정):")
+                    if remote_list:
+                        for it in remote_list[:50]:
+                            st.write("•", it["name"])
+                        if len(remote_list) > 50:
+                            st.write(f"... 외 {len(remote_list) - 50}개")
+                    else:
+                        st.write("- (현재 저장된 URL/Drive 영상 없음)")
+
+                    unity_ok_placeholder = st.empty()
+                    cont_unity = st.button("Unity Ads에 업로드하기", key=f"unity_continue_{i}")
+                    clr_unity = st.button("전체 초기화 (Unity용)", key=f"unity_clear_{i}")
 
         # =========================
         # RIGHT COLUMN: Settings (Facebook 선택일 때만)
@@ -1461,7 +1471,66 @@ for i, game in enumerate(GAMES):
                 st.session_state[f"clear_uploader_flag_{i}"] = True
                 ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
                 st.rerun()
+                # --- Unity Ads: handle upload & clear actions ---
+        if platform == "Unity Ads":
+            unity_settings = get_unity_settings(game)
 
+            if 'cont_unity' in locals() and cont_unity:
+                remote_list = st.session_state.remote_videos.get(game, []) or []
+                ok, msg = validate_count(remote_list)
+                if not ok:
+                    unity_ok_placeholder.error(msg)
+                else:
+                    try:
+                        summary = upload_unity_creatives_to_campaign(
+                            game=game,
+                            videos=remote_list,
+                            settings=unity_settings,
+                        )
+
+                        n_creatives = len(summary.get("creative_ids") or [])
+                        removed = summary.get("removed_ids") or []
+                        errors = summary.get("errors") or []
+
+                        if n_creatives > 0:
+                            unity_ok_placeholder.success(
+                                f"{msg} Unity Ads에 {n_creatives}개 크리에이티브(creative packs)를 생성하고 "
+                                f"캠페인에 연결했습니다."
+                            )
+                        else:
+                            unity_ok_placeholder.warning(
+                                "Unity Ads 호출은 성공했지만 생성된 크리에이티브 ID가 없습니다. "
+                                "Unity 대시보드에서 실제 상태를 확인해 주세요."
+                            )
+
+                        if removed:
+                            st.caption(
+                                f"캠페인에서 이전 크리에이티브 {len(removed)}개를 제거했습니다 "
+                                f"(예: {removed[:10]})"
+                            )
+
+                        if errors:
+                            st.error(
+                                "일부 단계에서 오류가 발생했습니다:\n"
+                                + "\n".join(f"- {e}" for e in errors[:20])
+                                + ("\n..." if len(errors) > 20 else "")
+                            )
+
+                    except Exception as e:
+                        import traceback
+                        st.exception(e)
+                        tb = traceback.format_exc()
+                        unity_ok_placeholder.error("Unity Ads 업로드 실패. 아래 오류 로그를 확인하세요.")
+                        st.code(tb, language="python")
+
+            if 'clr_unity' in locals() and clr_unity:
+                st.session_state.uploads.pop(game, None)
+                st.session_state.remote_videos.pop(game, None)
+                st.session_state.settings.pop(game, None)
+                st.session_state.unity_settings.pop(game, None)
+                st.session_state[f"clear_uploader_flag_{i}"] = True
+                unity_ok_placeholder.info("해당 게임의 업로드/설정(페북+유니티)을 모두 초기화했습니다.")
+                st.rerun()
 
 
 
