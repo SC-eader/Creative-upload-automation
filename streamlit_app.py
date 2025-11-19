@@ -184,15 +184,14 @@ def sanitize_store_url(raw: str) -> str:
 
 ASIA_SEOUL = timezone(timedelta(hours=9))  # KST (+09:00)
 
-def next_sat_0000_and_mon_1200_kst(today: datetime | None = None) -> tuple[str, str]:
-    """Return default (start_iso, end_iso) = next Saturday 00:00 and next Monday 12:00 in KST."""
+def next_sat_0000_kst(today: datetime | None = None) -> str:
+    """Return default start_iso = next Saturday 00:00 in KST."""
     now = (today or datetime.now(ASIA_SEOUL)).astimezone(ASIA_SEOUL)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
     # Monday=0 ... Saturday=5, Sunday=6
     days_until_sat = (5 - base.weekday()) % 7 or 7
     start_dt = (base + timedelta(days=days_until_sat)).replace(hour=0, minute=0)
-    end_dt = (start_dt + timedelta(days=2)).replace(hour=12, minute=0)  # Sat -> Mon 12:00
-    return start_dt.isoformat(), end_dt.isoformat()
+    return start_dt.isoformat()
 
 def compute_budget_from_settings(files: list, settings: dict, fallback_per_video: int = 10) -> int:
     """
@@ -337,29 +336,37 @@ def create_creativetest_adset(
     targeting: dict,
     daily_budget_usd: int,
     start_iso: str,
-    end_iso: str,
     optimization_goal: str,  # API token string like "APP_INSTALLS"
     promoted_object: dict | None = None,
+    end_iso: str | None = None,  # optional: only used if provided
 ) -> str:
     """Create a paused ad set with the given name/settings; return adset_id."""
     from facebook_business.adobjects.adset import AdSet
 
-    adset = account.create_ad_set(
-        fields=[],
-        params={
-            "name": adset_name,
-            "campaign_id": campaign_id,
-            "daily_budget": dollars_to_minor(daily_budget_usd),
-            "billing_event": AdSet.BillingEvent.impressions,
-            "optimization_goal": getattr(AdSet.OptimizationGoal, optimization_goal.lower(), AdSet.OptimizationGoal.app_installs),
-            "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
-            "targeting": targeting,
-            "status": AdSet.Status.paused,
-            "start_time": start_iso,
-            "end_time": end_iso,
-            **({"promoted_object": promoted_object} if promoted_object else {}),
-        },
-    )
+    params = {
+        "name": adset_name,
+        "campaign_id": campaign_id,
+        "daily_budget": dollars_to_minor(daily_budget_usd),
+        "billing_event": AdSet.BillingEvent.impressions,
+        "optimization_goal": getattr(
+            AdSet.OptimizationGoal,
+            optimization_goal.lower(),
+            AdSet.OptimizationGoal.app_installs,
+        ),
+        "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+        "targeting": targeting,
+        "status": AdSet.Status.paused,
+        "start_time": start_iso,
+    }
+
+    # Only include end_time if the user explicitly set one
+    if end_iso:
+        params["end_time"] = end_iso
+
+    if promoted_object:
+        params["promoted_object"] = promoted_object
+
+    adset = account.create_ad_set(fields=[], params=params)
     return adset["id"]
 
 def _save_uploadedfile_tmp(u) -> str:
@@ -779,14 +786,17 @@ def upload_videos_create_ads(
 
 def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, page_id: str, uploaded_files: list, settings: dict) -> dict:
     """Compute what would be created (no writes): ad set name, budget/schedule, and ad names."""
-    # Schedule
+    # Schedule: start is required (default = next Saturday 00:00 KST),
+    # end is optional (we won't automatically turn off if it's empty).
     start_iso = settings.get("start_iso")
+    if not start_iso:
+        # use your helper that returns the default start
+        start_iso = next_sat_0000_kst()
+
+    # end date is optional; keep it in the plan dict for display only (may be None / "")
     end_iso = settings.get("end_iso")
-    if not (start_iso and end_iso):
-        start_iso, end_iso = next_sat_0000_and_mon_1200_kst()
 
     # Ad set suffix: user-selected n
-        # Ad set suffix: user-selected n
     n = int(settings.get("suffix_number") or 1)
     suffix_str = f"{n}th"
 
@@ -794,11 +804,9 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
     launch_date_suffix = ""
     if settings.get("add_launch_date"):
         try:
-            # start_iso is already the launch Saturday 00:00 KST from settings or default
             dt = datetime.fromisoformat(start_iso)
             launch_date_suffix = "_" + dt.strftime("%y%m%d")
         except Exception:
-            # If parsing fails, just skip the date suffix
             launch_date_suffix = ""
 
     adset_name = f"{adset_prefix}_{suffix_str}{launch_date_suffix}"
@@ -806,8 +814,13 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
     # Videos (local + any server-downloaded)
     allowed = {".mp4", ".mpeg4"}
     remote = st.session_state.remote_videos.get(settings.get("game_key", ""), []) or []
-    def _name(u): return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
-    def _is_video(u): return pathlib.Path(_name(u)).suffix.lower() in allowed
+
+    def _name(u):
+        return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
+
+    def _is_video(u):
+        return pathlib.Path(_name(u)).suffix.lower() in allowed
+
     vids_local = [u for u in (uploaded_files or []) if _is_video(u)]
     vids_all = _dedupe_by_name(vids_local + [rv for rv in remote if _is_video(rv)])
 
@@ -824,7 +837,7 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
         "age_min": int(settings.get("age_min", 18)),
         "budget_usd_per_day": int(budget_usd_per_day),
         "start_iso": start_iso,
-        "end_iso": end_iso,
+        "end_iso": end_iso,  # may be None/empty; only for summary/UI
         "page_id": page_id,
         "n_videos": len(vids_all),
         "ad_names": ad_names,
@@ -999,10 +1012,10 @@ def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, 
             targeting=targeting,
             daily_budget_usd=plan["budget_usd_per_day"],
             start_iso=plan["start_iso"],
-            end_iso=plan["end_iso"],
             optimization_goal=opt_goal_api,
             promoted_object=promoted_object,
-        )
+            end_iso=plan.get("end_iso"),  # may be None; only used if present
+)
     except Exception:
         # Let outer try/except print the full traceback on screen
         raise
@@ -1328,19 +1341,13 @@ for i, game in enumerate(GAMES):
                     )
 
                     # 7) 예약 (기본: 토 00:00 → 월 12:00 KST)
-                    default_start_iso, default_end_iso = next_sat_0000_and_mon_1200_kst()
+                    default_start_iso = next_sat_0000_kst()
                     start_iso = st.text_input(
                         "시작 날짜/시간 (ISO, KST)",
                         value=cur.get("start_iso", default_start_iso),
-                        help="예: 2025-11-15T00:00:00+09:00",
+                        help="예: 2025-11-15T00:00:00+09:00 (종료일은 자동으로 꺼지지 않도록 설정하지 않습니다)",
                         key=f"start_{i}",
-                    )
-                    end_iso = st.text_input(
-                        "종료 날짜/시간 (ISO, KST)",
-                        value=cur.get("end_iso", default_end_iso),
-                        help="예: 2025-11-17T12:00:00+09:00",
-                        key=f"end_{i}",
-                    )
+)
 
                     # 8) 타겟 위치 (기본: United States)
                     country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
@@ -1409,7 +1416,6 @@ for i, game in enumerate(GAMES):
                         "opt_goal_label": opt_goal_label,
                         "budget_per_video_usd": int(budget_per_video_usd),
                         "start_iso": start_iso.strip(),
-                        "end_iso": end_iso.strip(),
                         "country": (country or "US").strip(),
                         "age_min": int(age_min),
                         "os_choice": os_choice,

@@ -12,7 +12,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from googleapiclient.errors import HttpError
 from google.oauth2.service_account import Credentials
-#export GOOGLE_APPLICATION_CREDENTIALS="/Users/you/Downloads/roas-test-456808-321ce7426bfb.json"
+#export GOOGLE_APPLICATION_CREDENTIALS="/Users/eader/Downloads/roas-test-456808-321ce7426bfb.json"
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
 def get_drive_service_from_secrets():
