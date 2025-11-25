@@ -1454,7 +1454,7 @@ for i, game in enumerate(GAMES):
                         def _render_summary(plan: dict, settings: dict, created: bool):
                             ...
                         if isinstance(plan, dict) and plan.get("adset_id"):
-                            ok_msg_placeholder.success(ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as ACTIVE, scheduled by start time)."))
+                            ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as ACTIVE, scheduled by start time).")
                             _render_summary(plan, settings, created=True)
                         else:
                             ok_msg_placeholder.error(
