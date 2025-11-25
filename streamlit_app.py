@@ -184,13 +184,13 @@ def sanitize_store_url(raw: str) -> str:
 
 ASIA_SEOUL = timezone(timedelta(hours=9))  # KST (+09:00)
 
-def next_sat_0000_kst(today: datetime | None = None) -> str:
+def next_sat_0900_kst(today: datetime | None = None) -> str:
     """Return default start_iso = next Saturday 00:00 in KST."""
     now = (today or datetime.now(ASIA_SEOUL)).astimezone(ASIA_SEOUL)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
     # Monday=0 ... Saturday=5, Sunday=6
     days_until_sat = (5 - base.weekday()) % 7 or 7
-    start_dt = (base + timedelta(days=days_until_sat)).replace(hour=0, minute=0)
+    start_dt = (base + timedelta(days=days_until_sat)).replace(hour=9, minute=0)
     return start_dt.isoformat()
 
 def compute_budget_from_settings(files: list, settings: dict, fallback_per_video: int = 10) -> int:
@@ -340,7 +340,7 @@ def create_creativetest_adset(
     promoted_object: dict | None = None,
     end_iso: str | None = None,  # optional: only used if provided
 ) -> str:
-    """Create a paused ad set with the given name/settings; return adset_id."""
+    """Create an active ad set with the given name/settings; return adset_id."""
     from facebook_business.adobjects.adset import AdSet
 
     params = {
@@ -355,7 +355,7 @@ def create_creativetest_adset(
         ),
         "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
         "targeting": targeting,
-        "status": AdSet.Status.paused,
+        "status": AdSet.Status.active,
         "start_time": start_iso,
     }
 
@@ -712,7 +712,7 @@ def upload_videos_create_ads(
                         "name": make_ad_name(name, ad_name_prefix),
                         "adset_id": adset_id,
                         "creative": {"creative_id": creative["id"]},
-                        "status": Ad.Status.paused,
+                        "status": Ad.Status.active,
                     },
                 )
                 return ad["id"]
@@ -791,7 +791,7 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
     start_iso = settings.get("start_iso")
     if not start_iso:
         # use your helper that returns the default start
-        start_iso = next_sat_0000_kst()
+        start_iso = next_sat_0900_kst()
 
     # end date is optional; keep it in the plan dict for display only (may be None / "")
     end_iso = settings.get("end_iso")
@@ -1340,8 +1340,8 @@ for i, game in enumerate(GAMES):
                         help="총 일일 예산 = (업로드/선택된 영상 수) × 이 값",
                     )
 
-                    # 7) 예약 (기본: 토 00:00 → 월 12:00 KST)
-                    default_start_iso = next_sat_0000_kst()
+                    # 7) 예약 (기본: 토 9:00)
+                    default_start_iso = next_sat_0900_kst()
                     start_iso = st.text_input(
                         "시작 날짜/시간 (ISO, KST)",
                         value=cur.get("start_iso", default_start_iso),
@@ -1454,7 +1454,7 @@ for i, game in enumerate(GAMES):
                         def _render_summary(plan: dict, settings: dict, created: bool):
                             ...
                         if isinstance(plan, dict) and plan.get("adset_id"):
-                            ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as PAUSED).")
+                            ok_msg_placeholder.success(ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as ACTIVE, scheduled by start time)."))
                             _render_summary(plan, settings, created=True)
                         else:
                             ok_msg_placeholder.error(
