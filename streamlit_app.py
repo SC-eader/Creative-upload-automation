@@ -562,18 +562,41 @@ def upload_videos_create_ads(
             v = account.create_ad_video(params={"file": path, "content_category": "VIDEO_GAMING"})
             return v["id"]
 
-    def wait_all_videos_ready(video_ids: list[str], *, timeout_s: int = 300, sleep_s: int = 5) -> dict[str, bool]:
+    def wait_all_videos_ready(video_ids: list[str], *, timeout_s: int = 120, sleep_s: int = 3) -> dict[str, bool]:
         """
-        FAST-PATH: skip polling AdVideo.status.
-
-        We assume Meta will finish encoding in the background and immediately
-        proceed to creative/ad creation. This removes the extra "Encoding..." wait
-        and significantly speeds up the end-to-end flow.
-
-        Returns {video_id: True} for all provided IDs so the rest of the pipeline
-        can run unchanged.
+        Wait until each video has at least one Meta-generated thumbnail.
+        This prevents blank previews in Ads Manager.
         """
-        return {vid: True for vid in (video_ids or [])}
+        from facebook_business.adobjects.advideo import AdVideo
+        import time
+
+        ready = {vid: False for vid in video_ids}
+        deadline = time.time() + timeout_s
+
+        while time.time() < deadline:
+            all_done = True
+            for vid in video_ids:
+                if ready[vid]:
+                    continue
+
+                try:
+                    info = AdVideo(vid).api_get(fields=["thumbnails", "picture"])
+                    has_pic = bool(info.get("picture"))
+                    has_thumbs = bool(info.get("thumbnails"))
+
+                    if has_pic or has_thumbs:
+                        ready[vid] = True
+                    else:
+                        all_done = False
+                except Exception:
+                    # transient processing state → try again
+                    all_done = False
+
+            if all_done:
+                break
+            time.sleep(sleep_s)
+
+        return ready
 
     def resolve_instagram_actor_id(page_id: str) -> str | None:
         """
@@ -688,7 +711,6 @@ def upload_videos_create_ads(
                     "video_id": video_id,
                     "title": name,
                     "message": "",
-                    "image_url": thumbnail_url,
                 }
 
                 if store_url:
