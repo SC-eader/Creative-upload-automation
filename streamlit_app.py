@@ -243,22 +243,24 @@ OPT_GOAL_LABEL_TO_API = {
 def build_targeting_from_settings(country: str, age_min: int, settings: dict) -> dict:
     """
     Build Meta targeting dict from UI settings.
-    Uses user_os (version tokens) to filter platform instead of deprecated operating_systems.
+
+    - Does NOT send publisher_platforms or device_platforms, so Meta uses
+      Advantage+ placements (automatic placements across FB/IG/AN/Messenger).
+    - Uses user_os (version tokens) to optionally filter OS family instead
+      of deprecated operating_systems.
     """
     os_choice = settings.get("os_choice", "Both")
     min_android = settings.get("min_android_os_token")  # e.g., "Android_ver_6.0_and_above" or None
     min_ios = settings.get("min_ios_os_token")          # e.g., "iOS_ver_15.0_and_above" or None
 
-    # Base targeting
+    # Base targeting: only country + age → let Meta decide placements.
     targeting = {
         "geo_locations": {"countries": [country]},
         "age_min": max(13, int(age_min)),
-        "publisher_platforms": ["facebook", "instagram"],
-        "device_platforms": ["mobile"],
     }
 
     # IMPORTANT: Do NOT send 'operating_systems' (deprecated/invalid).
-    # Enforce OS family via user_os tokens only.
+    # Enforce OS family via user_os tokens only (optional).
     user_os: list[str] = []
 
     if os_choice == "Android only":
