@@ -701,18 +701,22 @@ def upload_videos_create_ads(
         name, video_id = up["name"], up["video_id"]
 
         try:
-            # --- Fetch thumbnail ---
+            # --- Fetch thumbnail from Meta (used as image_url) ---
             video_info = AdVideo(video_id).api_get(fields=["picture"])
             thumbnail_url = video_info.get("picture")
             if not thumbnail_url:
-                raise RuntimeError("Video processed but no 'picture' (thumbnail) URL was returned.")
+                raise RuntimeError(
+                    "Video processed but no 'picture' (thumbnail) URL was returned."
+                )
 
-            # --- Internal create helper (copied from original loop) ---
+            # --- Internal create helper ---
             def _create_once(allow_ig: bool) -> str:
+                # IMPORTANT: image_url is REQUIRED by Meta for this video_data type
                 vd = {
                     "video_id": video_id,
                     "title": name,
                     "message": "",
+                    "image_url": thumbnail_url,
                 }
 
                 if store_url:
@@ -741,22 +745,19 @@ def upload_videos_create_ads(
                 )
                 return ad["id"]
 
-            # --- Try/Except logic (copied from original loop) ---
             try:
                 ad_id = _create_once(True)
             except FacebookRequestError as e:
                 msg = (e.api_error_message() or "").lower()
                 if "instagram" in msg or "not ready" in msg or "processing" in msg:
-                    time.sleep(5) # Sleep is fine, it's in a thread
+                    time.sleep(5)
                     ad_id = _create_once(False)
                 else:
                     raise
-            
-            # Return success
+
             return {"success": True, "result": {"name": name, "ad_id": ad_id}}
 
         except Exception as e:
-            # Return failure
             return {"success": False, "error": f"{name}: creative/ad failed: {e}"}
 
     # --- NEW: Run _process_one_video in a ThreadPool ---
@@ -1305,21 +1306,14 @@ for i, game in enumerate(GAMES):
 
                     # 1) 광고 세트 이름: campaign_name + "_nth"
                                         # 1) 광고 세트 이름: campaign_name + "_nth"
+                                        # 1) 광고 세트 이름: campaign_name + "_nth"
                     suffix_number = st.number_input(
                         "광고 세트 접미사 n(…_nth)",
                         min_value=1,
                         step=1,
                         value=int(cur.get("suffix_number", 1)),
-                        help="Ad set will be named as <campaign_name>_<n>th or <campaign_name>_<n>th_YYYYmmdd",
+                        help="Ad set will be named as <campaign_name>_<n>th or <campaign_name>_<n>th_YYMMDD",
                         key=f"suffix_{i}",
-                    )
-
-                    # 선택: 시작 날짜(launch Saturday)의 YYYYmmdd를 광고 세트 이름에 추가
-                    add_launch_date = st.checkbox(
-                        "Launch 날짜 추가",
-                        value=bool(cur.get("add_launch_date", False)),
-                        key=f"add_launch_date_{i}",
-                        help="예: weaponrpg_aos_facebook_us_creativetest_35th_20251122",
                     )
 
                     # 2) 앱 홍보 - 스토어 선택 (기본: Google Play)
@@ -1356,6 +1350,7 @@ for i, game in enumerate(GAMES):
                     st.caption("기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — Facebook에서 고정/제한될 수 있습니다.")
 
                     # 6) 예산 (per-video × 개수)
+                                        # 6) 예산 (per-video × 개수)
                     budget_per_video_usd = st.number_input(
                         "영상 1개당 일일 예산 (USD)",
                         min_value=1,
@@ -1371,7 +1366,25 @@ for i, game in enumerate(GAMES):
                         value=cur.get("start_iso", default_start_iso),
                         help="예: 2025-11-15T00:00:00+09:00 (종료일은 자동으로 꺼지지 않도록 설정하지 않습니다)",
                         key=f"start_{i}",
-)
+                    )
+
+                    # 7-1) 시작 날짜 기반 Launch 날짜 접미사 추가 옵션
+                    launch_date_example = ""
+                    try:
+                        dt_preview = datetime.fromisoformat(start_iso.strip())
+                        launch_date_example = dt_preview.strftime("%y%m%d")
+                    except Exception:
+                        launch_date_example = ""
+
+                    add_launch_date = st.checkbox(
+                        "Launch 날짜 추가",
+                        value=bool(cur.get("add_launch_date", False)),
+                        key=f"add_launch_date_{i}",
+                        help=(
+                            f"시작 날짜/시간의 날짜(YYMMDD)를 광고 세트 이름 끝에 추가합니다. "
+                            f"예: …_{int(suffix_number)}th_{launch_date_example or 'YYMMDD'}"
+                        ),
+                    )
 
                     # 8) 타겟 위치 (기본: United States)
                     country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
