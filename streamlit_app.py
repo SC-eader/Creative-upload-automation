@@ -30,6 +30,7 @@ from unity_ads import (
     render_unity_settings_panel,
     get_unity_settings,
     upload_unity_creatives_to_campaign,
+    apply_unity_creative_packs_to_campaign
 )
 VERBOSE_UPLOAD_LOG = False
 
@@ -182,10 +183,19 @@ def sanitize_store_url(raw: str) -> str:
     # Other hosts: return unchanged
     return raw
 
-ASIA_SEOUL = timezone(timedelta(hours=9))  # KST (+09:00)
+
+# --------------------------------------------------------------------
+# Date helper: next Sat 09:00 (KST), no end time
+# --------------------------------------------------------------------
+ASIA_SEOUL = timezone(timedelta(hours=9))
+
 
 def next_sat_0900_kst(today: datetime | None = None) -> str:
-    """Return default start_iso = next Saturday 00:00 in KST."""
+    """
+    Compute start_iso in KST:
+      - start: next Saturday 09:00
+    Returned string is ISO8601 with +09:00 offset.
+    """
     now = (today or datetime.now(ASIA_SEOUL)).astimezone(ASIA_SEOUL)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
     # Monday=0 ... Saturday=5, Sunday=6
@@ -811,7 +821,7 @@ def upload_videos_create_ads(
 
 def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, page_id: str, uploaded_files: list, settings: dict) -> dict:
     """Compute what would be created (no writes): ad set name, budget/schedule, and ad names."""
-    # Schedule: start is required (default = next Saturday 00:00 KST),
+    # Schedule: start is required (default = next Saturday 09:00 KST),
     # end is optional (we won't automatically turn off if it's empty).
     start_iso = settings.get("start_iso")
     if not start_iso:
@@ -873,7 +883,7 @@ def _plan_upload(account: AdAccount, *, campaign_id: str, adset_prefix: str, pag
     }
 
 def upload_to_facebook(game_name: str, uploaded_files: list, settings: dict, *, simulate: bool = False):
-    """Create the chosen ad set and one paused ad per video (simulate=True returns plan only)."""
+    """Create the chosen ad set and one active ad per video (simulate=True returns plan only)."""
 
     mapping = {
         "XP HERO": {
@@ -1150,17 +1160,14 @@ for i, game in enumerate(GAMES):
         left_col, right_col = st.columns([2, 1], gap="large")
 
         # =========================
-        # LEFT COLUMN: 게임 이름 + 플랫폼 선택 + Drive/버튼들
-        # =========================
-                # =========================
-        # LEFT COLUMN: 게임 이름 + 플랫폼 선택 + Drive/버튼들
+        # LEFT COLUMN: 게임 이름 + 플랫폼 선택 + 공통 Drive import + 플랫폼별 버튼
         # =========================
         with left_col:
             left_card = st.container(border=True)
             with left_card:
                 st.subheader(game)
 
-                # --- Platform selector (Unity는 그대로 유지) ---
+                # --- 플랫폼 선택: 게임 제목 바로 아래 ---
                 platform = st.radio(
                     "플랫폼 선택",
                     ["Facebook", "Unity Ads"],
@@ -1169,128 +1176,134 @@ for i, game in enumerate(GAMES):
                     key=f"platform_{i}",
                 )
 
+                # 플랫폼별 섹션 헤더
                 if platform == "Facebook":
-                    # --- Import videos from Google Drive folder (server-side) ---
-                    st.markdown("**구글 드라이브에서 Creative Videos를 가져옵니다**")
-                    drv_input = st.text_input(
-                        "Drive folder URL or ID",
-                        key=f"drive_folder_{i}",
-                        placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
+                    st.markdown("### Facebook")
+                else:
+                    st.markdown("### Unity Ads")
+
+                # --- 공통: 구글 드라이브에서 Creative Videos 가져오기 (Facebook/Unity 공용) ---
+                st.markdown("**구글 드라이브에서 Creative Videos를 가져옵니다**")
+                drv_input = st.text_input(
+                    "Drive folder URL or ID",
+                    key=f"drive_folder_{i}",
+                    placeholder="https://drive.google.com/drive/folders/<FOLDER_ID>",
+                )
+
+                with st.expander("Advanced import options", expanded=False):
+                    workers = st.number_input(
+                        "Parallel workers",
+                        min_value=1,
+                        max_value=16,
+                        value=8,
+                        key=f"drive_workers_{i}",
+                        help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
                     )
 
-                    # Advanced option: hidden by default
-                    with st.expander("Advanced import options", expanded=False):
-                        workers = st.number_input(
-                            "Parallel workers",
-                            min_value=1,
-                            max_value=16,
-                            value=8,
-                            key=f"drive_workers_{i}",
-                            help="Higher = more simultaneous downloads (faster) but more load / chance of throttling.",
+                if st.button("드라이브에서 Creative 가져오기", key=f"drive_import_{i}"):
+                    try:
+                        overall = st.progress(0, text="0/0 • waiting…")
+                        log_box = st.empty()
+                        lines: List[str] = []
+
+                        import time
+                        last_flush = [0.0]  # <-- mutable holder instead of nonlocal
+
+                        def _on_progress(done: int, total: int, name: str, err: str | None):
+                            pct = int((done / max(total, 1)) * 100)
+                            label = f"{done}/{total}"
+                            if name:
+                                label += f" • {name}"
+                            if err:
+                                lines.append(f"❌ {name}  —  {err}")
+                            else:
+                                lines.append(f"✅ {name}")
+
+                            now = time.time()
+                            # Only update UI every ~0.3s or on final item
+                            if (now - last_flush[0]) > 0.3 or done == total:
+                                overall.progress(pct, text=label)
+                                log_box.write("\n".join(lines[-200:]))
+                                last_flush[0] = now
+
+                        with st.status("Importing videos from Drive folder...", expanded=True) as status:
+                            imported = _run_drive_import(
+                                drv_input,
+                                max_workers=int(workers),
+                                on_progress=_on_progress,
+                            )
+                            lst = st.session_state.remote_videos.get(game, [])
+                            lst.extend(imported)
+                            st.session_state.remote_videos[game] = lst
+
+                            status.update(
+                                label=f"Drive import complete: {len(imported)} file(s)",
+                                state="complete",
+                            )
+                            if isinstance(imported, dict) and imported.get("errors"):
+                                st.warning(
+                                    "Some files failed:\n- "
+                                    + "\n".join(imported["errors"])
+                                )
+
+                        st.success(f"Imported {len(imported)} video(s) from the folder.")
+                        if len(imported) < 1:
+                            st.info("No eligible videos found. Check access, file types, or folder contents.")
+                    except Exception as e:
+                        st.exception(e)
+                        st.error(
+                            "Could not import from this folder. "
+                            "Make sure your service account has access and the folder contains videos."
                         )
 
-                    if st.button("드라이브에서 Creative 가져오기", key=f"drive_import_{i}"):
-                        try:
-                            overall = st.progress(0, text="0/0 • waiting…")
-                            log_box = st.empty()
-                            lines: List[str] = []
-                            imported_accum: List[Dict] = []
+                # --- 공통: 현재 다운로드된/저장된 리스트 + 초기화 ---
+                remote_list = st.session_state.remote_videos.get(game, [])
 
-                            import time
-                            last_flush = [0.0]  # <-- mutable holder instead of nonlocal
+                st.caption("다운로드된 Creatives:")
+                if remote_list:
+                    for it in remote_list[:50]:
+                        st.write("•", it["name"])
+                    if len(remote_list) > 50:
+                        st.write(f"... 외 {len(remote_list) - 50}개")
+                else:
+                    st.write("- (현재 저장된 URL/Drive 영상 없음)")
 
-                            def _on_progress(done: int, total: int, name: str, err: str | None):
-                                pct = int((done / max(total, 1)) * 100)
-                                label = f"{done}/{total}"
-                                if name:
-                                    label += f" • {name}"
-                                if err:
-                                    lines.append(f"❌ {name}  —  {err}")
-                                else:
-                                    lines.append(f"✅ {name}")
-
-                                now = time.time()
-                                # Only update UI every ~0.3s or on final item
-                                if (now - last_flush[0]) > 0.3 or done == total:
-                                    overall.progress(pct, text=label)
-                                    log_box.write("\n".join(lines[-200:]))
-                                    last_flush[0] = now
-
-                            with st.status("Importing videos from Drive folder...", expanded=True) as status:
-                                imported = _run_drive_import(
-                                    drv_input,
-                                    max_workers=int(workers),
-                                    on_progress=_on_progress,
-                                )
-                                imported_accum.extend(imported)
-                                lst = st.session_state.remote_videos.get(game, [])
-                                lst.extend(imported_accum)
-                                st.session_state.remote_videos[game] = lst
-
-                                status.update(
-                                    label=f"Drive import complete: {len(imported_accum)} file(s)",
-                                    state="complete",
-                                )
-                                if isinstance(imported, dict) and imported.get("errors"):
-                                    st.warning("Some files failed:\n- " + "\n- ".join(imported["errors"]))
-
-                            st.success(f"Imported {len(imported_accum)} video(s) from the folder.")
-                            if len(imported_accum) < 1:
-                                st.info("No eligible videos found. Check access, file types, or folder contents.")
-                        except Exception as e:
-                            st.exception(e)
-                            st.error(
-                                "Could not import from this folder. "
-                                "Make sure your service account has access and the folder contains videos."
-                            )
-
-                    # --- Shared list & clear button for all remote videos (URL + Drive) ---
-                    remote_list = st.session_state.remote_videos.get(game, [])
-
-                    st.caption("다운로드된 Creatives:")
+                if st.button("URL/Drive 영상만 초기화", key=f"clearurl_{i}"):
                     if remote_list:
-                        for it in remote_list[:50]:
-                            st.write("•", it["name"])
+                        st.session_state.remote_videos[game] = []
+                        st.info("Cleared URL/Drive videos for this game.")
+                        st.rerun()
                     else:
-                        st.write("- (현재 저장된 URL/Drive 영상 없음)")
+                        st.info("삭제할 URL/Drive 영상이 없습니다.")
 
-                    # 🔹 URL/Drive 영상만 지우는 버튼 (항상 표시)
-                    if st.button("URL/Drive 영상만 초기화", key=f"clearurl_{i}"):
-                        if remote_list:
-                            st.session_state.remote_videos[game] = []
-                            st.info("Cleared URL/Drive videos for this game.")
-                            st.rerun()
-                        else:
-                            st.info("삭제할 URL/Drive 영상이 없습니다.")
-
+                # --- 플랫폼별 버튼들 ---
+                if platform == "Facebook":
+                    # Facebook용 버튼
                     ok_msg_placeholder = st.empty()
                     cont = st.button("Creative Test 업로드하기", key=f"continue_{i}")
                     clr = st.button("전체 초기화", key=f"clear_{i}")
 
                 else:
                     # =========================
-                    # UNITY ADS FLOW
+                    # UNITY ADS FLOW 버튼
                     # =========================
-                    st.markdown("### Unity Ads")
-
-                    remote_list = st.session_state.remote_videos.get(game, []) or []
-                    st.caption("다운로드된 Creatives (Unity에 업로드 예정):")
-                    if remote_list:
-                        for it in remote_list[:50]:
-                            st.write("•", it["name"])
-                        if len(remote_list) > 50:
-                            st.write(f"... 외 {len(remote_list) - 50}개")
-                    else:
-                        st.write("- (현재 저장된 URL/Drive 영상 없음)")
-
                     unity_ok_placeholder = st.empty()
-                    cont_unity = st.button("Unity Ads에 업로드하기", key=f"unity_continue_{i}")
+
+                    cont_unity_create = st.button(
+                        "크리에이티브/팩 생성",
+                        key=f"unity_create_{i}",
+                        help="Drive에서 가져온 영상으로 Unity creative + creative packs를 만듭니다 (캠페인에는 아직 적용 안 함).",
+                    )
+
+                    cont_unity_apply = st.button(
+                        "캠페인에 적용",
+                        key=f"unity_apply_{i}",
+                        help="방금 생성한 creative packs만 캠페인에 assign하고, 이전 iteration pack들은 unassign 합니다.",
+                    )
+
                     clr_unity = st.button("전체 초기화 (Unity용)", key=f"unity_clear_{i}")
 
         # =========================
-        # RIGHT COLUMN: Settings (Facebook 선택일 때만)
-        # =========================
-                # =========================
         # RIGHT COLUMN: Settings (플랫폼별)
         # =========================
         if platform == "Facebook":
@@ -1300,7 +1313,7 @@ for i, game in enumerate(GAMES):
                     ensure_settings_state()
 
                     # 🔹 게임 이름과 묶인 Settings 헤더
-                    st.markdown(f"### {game} Settings")
+                    st.markdown(f"#### {game} Facebook Settings")
 
                     cur = st.session_state.settings.get(game, {})
 
@@ -1385,6 +1398,7 @@ for i, game in enumerate(GAMES):
                             f"예: …_{int(suffix_number)}th_{launch_date_example or 'YYMMDD'}"
                         ),
                     )
+
 
                     # 8) 타겟 위치 (기본: United States)
                     country = st.text_input("국가", value=cur.get("country", "US"), key=f"country_{i}")
@@ -1472,6 +1486,9 @@ for i, game in enumerate(GAMES):
                 render_unity_settings_panel(unity_card, game, i)
 
         # --- Handle button actions after BOTH columns are drawn (Facebook only) ---
+                # --- Handle button actions after BOTH columns are drawn ---
+                # --- Handle button actions after BOTH columns are drawn ---
+        # FACEBOOK FLOW --------------------------------------------------
         if platform == "Facebook":
             if cont:
                 # Only use server-downloaded (Drive) videos now
@@ -1490,8 +1507,11 @@ for i, game in enumerate(GAMES):
                         # (기존 _render_summary 정의 및 사용 그대로 유지)
                         def _render_summary(plan: dict, settings: dict, created: bool):
                             ...
+
                         if isinstance(plan, dict) and plan.get("adset_id"):
-                            ok_msg_placeholder.success(msg + " Uploaded to Meta (ads created as ACTIVE, scheduled by start time).")
+                            ok_msg_placeholder.success(
+                                msg + " Uploaded to Meta (ads created as ACTIVE, scheduled by start time)."
+                            )
                             _render_summary(plan, settings, created=True)
                         else:
                             ok_msg_placeholder.error(
@@ -1514,16 +1534,33 @@ for i, game in enumerate(GAMES):
                 st.session_state[f"clear_uploader_flag_{i}"] = True
                 ok_msg_placeholder.info("Cleared saved uploads, URL videos, and settings for this game.")
                 st.rerun()
-                # --- Unity Ads: handle upload & clear actions ---
+
+        # UNITY ADS FLOW --------------------------------------------------
         if platform == "Unity Ads":
             unity_settings = get_unity_settings(game)
 
-            if 'cont_unity' in locals() and cont_unity:
+            # Store newly created creative pack IDs per game so we can later apply them
+            if "unity_created_packs" not in st.session_state:
+                st.session_state.unity_created_packs = {}  # {game: [pack_id, ...]}
+
+            # 1) CREATE creatives + packs (library only)
+            if "cont_unity_create" in locals() and cont_unity_create:
                 remote_list = st.session_state.remote_videos.get(game, []) or []
+
                 ok, msg = validate_count(remote_list)
                 if not ok:
                     unity_ok_placeholder.error(msg)
                 else:
+                    # ⚠️ Runtime warning if no playable is selected at all
+                    if not (
+                        unity_settings.get("selected_playable")
+                        or unity_settings.get("existing_playable_id")
+                    ):
+                        unity_ok_placeholder.warning(
+                            "현재 선택된 playable이 없습니다. Unity creative pack은 "
+                            "9:16 영상 1개 + 16:9 영상 1개 + 1개의 playable 조합이 권장됩니다."
+                        )
+
                     try:
                         summary = upload_unity_creatives_to_campaign(
                             game=game,
@@ -1531,30 +1568,27 @@ for i, game in enumerate(GAMES):
                             settings=unity_settings,
                         )
 
-                        n_creatives = len(summary.get("creative_ids") or [])
-                        removed = summary.get("removed_ids") or []
+                        pack_ids = summary.get("creative_ids") or []
                         errors = summary.get("errors") or []
 
-                        if n_creatives > 0:
+                        # Save pack IDs for this game so the "apply" button can use them
+                        st.session_state.unity_created_packs[game] = list(pack_ids)
+
+                        n_packs = len(pack_ids)
+                        if n_packs > 0:
                             unity_ok_placeholder.success(
-                                f"{msg} Unity Ads에 {n_creatives}개 크리에이티브(creative packs)를 생성하고 "
-                                f"캠페인에 연결했습니다."
+                                f"{msg} Unity Ads에 {n_packs}개 creative pack을 생성했습니다.\n"
+                                "이제 '캠페인에 적용' 버튼으로 해당 pack들을 캠페인에 assign 할 수 있습니다."
                             )
                         else:
                             unity_ok_placeholder.warning(
-                                "Unity Ads 호출은 성공했지만 생성된 크리에이티브 ID가 없습니다. "
+                                "Unity Ads 호출은 성공했지만 생성된 creative pack ID가 없습니다. "
                                 "Unity 대시보드에서 실제 상태를 확인해 주세요."
-                            )
-
-                        if removed:
-                            st.caption(
-                                f"캠페인에서 이전 크리에이티브 {len(removed)}개를 제거했습니다 "
-                                f"(예: {removed[:10]})"
                             )
 
                         if errors:
                             st.error(
-                                "일부 단계에서 오류가 발생했습니다:\n"
+                                "일부 영상에서 오류가 발생했습니다:\n"
                                 + "\n".join(f"- {e}" for e in errors[:20])
                                 + ("\n..." if len(errors) > 20 else "")
                             )
@@ -1563,14 +1597,67 @@ for i, game in enumerate(GAMES):
                         import traceback
                         st.exception(e)
                         tb = traceback.format_exc()
-                        unity_ok_placeholder.error("Unity Ads 업로드 실패. 아래 오류 로그를 확인하세요.")
+                        unity_ok_placeholder.error("Unity Ads 크리에이티브/팩 생성 실패. 아래 오류 로그를 확인하세요.")
                         st.code(tb, language="python")
 
-            if 'clr_unity' in locals() and clr_unity:
+            # 2) APPLY packs to campaign (assign new, unassign old)
+            if "cont_unity_apply" in locals() and cont_unity_apply:
+                pack_ids = st.session_state.unity_created_packs.get(game) or []
+                if not pack_ids:
+                    unity_ok_placeholder.error(
+                        "적용할 creative pack이 없습니다. 먼저 '크리에이티브/팩 생성' 버튼을 눌러주세요."
+                    )
+                else:
+                    try:
+                        result = apply_unity_creative_packs_to_campaign(
+                            game=game,
+                            creative_pack_ids=pack_ids,
+                            settings=unity_settings,
+                        )
+
+                        assigned = result.get("assigned_packs") or []
+                        removed = result.get("removed_assignments") or []
+                        errors = result.get("errors") or []
+
+                        if assigned:
+                            unity_ok_placeholder.success(
+                                f"캠페인에 {len(assigned)}개 creative pack을 assign했습니다.\n"
+                                "이전 iteration의 pack들은 모두 unassign 되었습니다."
+                            )
+                        else:
+                            unity_ok_placeholder.warning(
+                                "캠페인에 새로 assign된 creative pack이 없습니다. "
+                                "Unity 대시보드에서 캠페인 상태를 확인해 주세요."
+                            )
+
+                        if removed:
+                            st.caption(
+                                f"기존 assigned creative pack {len(removed)}개를 unassign 했습니다."
+                            )
+
+                        if errors:
+                            st.error(
+                                "캠페인 적용 중 일부 오류가 발생했습니다:\n"
+                                + "\n".join(f"- {e}" for e in errors[:20])
+                                + ("\n..." if len(errors) > 20 else "")
+                            )
+
+                    except Exception as e:
+                        import traceback
+                        st.exception(e)
+                        tb = traceback.format_exc()
+                        unity_ok_placeholder.error("Unity 캠페인 적용 실패. 아래 오류 로그를 확인하세요.")
+                        st.code(tb, language="python")
+
+            # 3) CLEAR (Unity + Facebook for this game)
+            if "clr_unity" in locals() and clr_unity:
                 st.session_state.uploads.pop(game, None)
                 st.session_state.remote_videos.pop(game, None)
                 st.session_state.settings.pop(game, None)
                 st.session_state.unity_settings.pop(game, None)
+                if "unity_created_packs" in st.session_state:
+                    st.session_state.unity_created_packs.pop(game, None)
+
                 st.session_state[f"clear_uploader_flag_{i}"] = True
                 unity_ok_placeholder.info("해당 게임의 업로드/설정(페북+유니티)을 모두 초기화했습니다.")
                 st.rerun()

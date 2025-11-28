@@ -62,11 +62,40 @@ def get_drive_service_from_secrets():
             return build("drive", "v3", credentials=creds, cache_discovery=False)
 
     if info is None:
+        # Build a short diagnostics summary to help users understand why no creds were found.
+        diag: list[str] = []
+        try:
+            if hasattr(st, "secrets") and isinstance(st.secrets, dict):
+                try:
+                    keys = list(st.secrets.keys())
+                except Exception:
+                    keys = ["(unreadable)"]
+                diag.append(f"st.secrets present; keys: {keys}")
+            else:
+                diag.append("st.secrets: not present or not a dict")
+        except Exception as _:
+            diag.append("st.secrets: access raised an exception")
+
+        env_json = bool(os.getenv("GOOGLE_CREDENTIALS") or os.getenv("GCP_SERVICE_ACCOUNT_JSON"))
+        diag.append(f"GOOGLE_CREDENTIALS / GCP_SERVICE_ACCOUNT_JSON set: {env_json}")
+
+        gapp = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if gapp:
+            diag.append(f"GOOGLE_APPLICATION_CREDENTIALS='{gapp}'; exists: {os.path.isfile(gapp)}")
+        else:
+            diag.append("GOOGLE_APPLICATION_CREDENTIALS: not set")
+
         raise RuntimeError(
             "No Google service account credentials found.\n"
-            "- Either set st.secrets['gcp_service_account'] in secrets.toml, or\n"
-            "- Export GOOGLE_CREDENTIALS / GCP_SERVICE_ACCOUNT_JSON with the JSON content, or\n"
-            "- Export GOOGLE_APPLICATION_CREDENTIALS with the path to the JSON key file."
+            "Possible fixes:\n"
+            "  - Add your service account JSON as a nested table in .streamlit/secrets.toml under the key 'gcp_service_account' (run app with `streamlit run`).\n"
+            "    Example (TOML):\n"
+            "      [gcp_service_account]\n"
+            "      type = \"service_account\"\n"
+            "      project_id = \"...\"\n"
+            "      private_key = '''-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----'''\n"
+            "  - Or export the full JSON into GOOGLE_CREDENTIALS (env) or set GOOGLE_APPLICATION_CREDENTIALS to the path of the key file.\n\n"
+            "Diagnostics:\n" + "\n".join(diag)
         )
 
     # If we got info (from st.secrets or env JSON), build the client from it

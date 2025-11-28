@@ -7,258 +7,622 @@ from datetime import datetime, timedelta, timezone
 import logging
 import pathlib
 import re
+import os
+import json
 
+import time
+import requests
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
+# --------------------------------------------------------------------
+# Unity config from secrets.toml
+# --------------------------------------------------------------------
+unity_cfg = st.secrets.get("unity", {}) or {}
+
+UNITY_ORG_ID_DEFAULT = unity_cfg.get("organization_id", "")
+UNITY_CLIENT_ID_DEFAULT = unity_cfg.get("client_id", "")
+UNITY_CLIENT_SECRET_DEFAULT = unity_cfg.get("client_secret", "")
+UNITY_AUTH_HEADER_DEFAULT = unity_cfg.get("authorization_header", "")
+
+_raw_game_ids = unity_cfg.get("game_ids", {}) or {}
+_raw_campaign_ids = unity_cfg.get("campaign_ids", {}) or {}
+
+UNITY_GAME_IDS: Dict[str, str] = {
+    str(game): str(title_id)
+    for game, title_id in _raw_game_ids.items()
+}
+
+UNITY_CAMPAIGN_IDS: Dict[str, List[str]] = {}
+for game, val in _raw_campaign_ids.items():
+    if isinstance(val, dict) and "ids" in val:
+        UNITY_CAMPAIGN_IDS[str(game)] = [str(x) for x in (val.get("ids") or [])]
+    elif isinstance(val, (list, tuple)):
+        UNITY_CAMPAIGN_IDS[str(game)] = [str(x) for x in val]
+    elif isinstance(val, str):
+        UNITY_CAMPAIGN_IDS[str(game)] = [val]
+
+UNITY_BASE_URL = "https://services.api.unity.com/advertise/v1"
 
 # --------------------------------------------------------------------
-# Session-state helpers (settings per game)
+# Session-state helpers
 # --------------------------------------------------------------------
 def _ensure_unity_settings_state() -> None:
-    """Make sure we have st.session_state.unity_settings for per-game Unity settings."""
     if "unity_settings" not in st.session_state:
         st.session_state.unity_settings = {}
 
-
 def get_unity_settings(game: str) -> Dict:
-    """Return the Unity settings dict for the given game (empty if not set yet)."""
     _ensure_unity_settings_state()
     return st.session_state.unity_settings.get(game, {})
 
+# --------------------------------------------------------------------
+# Unity settings UI
+# --------------------------------------------------------------------
+def render_unity_settings_panel(right_col, game: str, idx: int) -> None:
+    _ensure_unity_settings_state()
+
+    with right_col:
+        st.markdown(f"#### {game} Unity Settings")
+        cur = st.session_state.unity_settings.get(game, {})
+
+        secret_title_id = str(UNITY_GAME_IDS.get(game, ""))
+        secret_campaign_ids = UNITY_CAMPAIGN_IDS.get(game, []) or []
+        default_campaign_id_val = secret_campaign_ids[0] if secret_campaign_ids else ""
+
+        title_key = f"unity_title_{idx}"
+        campaign_key = f"unity_campaign_{idx}"
+
+        if st.session_state.get(title_key) == "" and secret_title_id:
+            st.session_state[title_key] = secret_title_id
+        if (not secret_campaign_ids and st.session_state.get(campaign_key) == "" and default_campaign_id_val):
+            st.session_state[campaign_key] = default_campaign_id_val
+
+        current_title_id = cur.get("title_id") or st.session_state.get(title_key) or secret_title_id
+        current_campaign_id = cur.get("campaign_id") or st.session_state.get(campaign_key) or default_campaign_id_val
+
+        default_org_id = cur.get("org_id") or UNITY_ORG_ID_DEFAULT
+        default_client_id = cur.get("client_id") or UNITY_CLIENT_ID_DEFAULT
+        default_client_secret = cur.get("client_secret") or UNITY_CLIENT_SECRET_DEFAULT
+
+        unity_title_id = current_title_id
+        st.session_state[title_key] = unity_title_id
+        unity_campaign_id = current_campaign_id
+        st.session_state[campaign_key] = unity_campaign_id
+        unity_org_id = default_org_id
+        st.session_state[f"unity_org_{idx}"] = unity_org_id
+        unity_client_id = default_client_id
+        st.session_state[f"unity_client_id_{idx}"] = unity_client_id
+        unity_client_secret = default_client_secret
+        st.session_state[f"unity_client_secret_{idx}"] = unity_client_secret
+
+        unity_daily_budget = 0
+
+        st.markdown("#### Playable 선택")
+        drive_playables = [
+            v for v in (st.session_state.remote_videos.get(game, []) if "remote_videos" in st.session_state else [])
+            if "playable" in (v.get("name") or "").lower()
+        ]
+        drive_options = [p["name"] for p in drive_playables]
+        prev_drive_playable = cur.get("selected_playable", "")
+
+        selected_drive_playable = st.selectbox(
+            "Drive에서 가져온 플레이어블",
+            options=["(선택 안 함)"] + drive_options,
+            index=(drive_options.index(prev_drive_playable) + 1) if prev_drive_playable in drive_options else 0,
+            key=f"unity_playable_{idx}",
+        )
+        chosen_drive_playable = selected_drive_playable if selected_drive_playable != "(선택 안 함)" else ""
+
+        existing_labels: List[str] = ["(선택 안 함)"]
+        existing_id_by_label: Dict[str, str] = {}
+        prev_existing_label = cur.get("existing_playable_label", "")
+
+        try:
+            org_for_list = (unity_org_id or UNITY_ORG_ID_DEFAULT).strip()
+            title_for_list = (unity_title_id or secret_title_id).strip()
+
+            if org_for_list and title_for_list:
+                # IMPORTANT: Fetch STRICT Playables only
+                playable_creatives = _unity_list_playable_creatives(org_id=org_for_list, title_id=title_for_list)
+                for cr in playable_creatives:
+                    cr_id = str(cr.get("id") or "")
+                    cr_name = cr.get("name") or "(no name)"
+                    cr_type = cr.get("type", "")
+                    if not cr_id: continue
+                    label = f"{cr_name} ({cr_type}) [{cr_id}]"
+                    existing_labels.append(label)
+                    existing_id_by_label[label] = cr_id
+        except Exception as e:
+            st.info(f"Unity playable 목록을 불러오지 못했습니다: {e}")
+
+        try:
+            existing_default_idx = existing_labels.index(prev_existing_label)
+        except ValueError:
+            existing_default_idx = 0
+
+        selected_existing_label = st.selectbox(
+            "Unity에 이미 있는 playable",
+            options=existing_labels,
+            index=existing_default_idx,
+            key=f"unity_existing_playable_{idx}",
+        )
+
+        existing_playable_id = ""
+        if selected_existing_label != "(선택 안 함)":
+            existing_playable_id = existing_id_by_label.get(selected_existing_label, "")
+
+        st.warning(
+            "Unity creative pack은 **9:16 영상 1개 + 16:9 영상 1개 + 1개의 playable** 조합을 기준으로 생성됩니다."
+        )
+
+        st.session_state.unity_settings[game] = {
+            "title_id": (unity_title_id or "").strip(),
+            "campaign_id": (unity_campaign_id or "").strip(),
+            "org_id": (unity_org_id or "").strip(),
+            "daily_budget_usd": int(unity_daily_budget),
+            "selected_playable": chosen_drive_playable,
+            "existing_playable_id": existing_playable_id,
+            "existing_playable_label": selected_existing_label,
+        }
 
 # --------------------------------------------------------------------
-# Date helper: next Sat 00:00 → next Mon 12:00 (KST)
+# Utilities
 # --------------------------------------------------------------------
 ASIA_SEOUL = timezone(timedelta(hours=9))
 
-
-def next_sat_0000_and_mon_1200_kst(today: datetime | None = None) -> tuple[str, str]:
-    """
-    Compute (start_iso, end_iso) in KST:
-      - start: next Saturday 00:00
-      - end:   next Monday 12:00
-    Returned strings are ISO8601 with +09:00 offset.
-    """
+def next_sat_0000_kst(today: datetime | None = None) -> str:
     now = (today or datetime.now(ASIA_SEOUL)).astimezone(ASIA_SEOUL)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # Monday=0 ... Saturday=5, Sunday=6
     days_until_sat = (5 - base.weekday()) % 7 or 7
-    start_dt = (base + timedelta(days=days_until_sat)).replace(hour=0, minute=0)
-    end_dt = (start_dt + timedelta(days=2)).replace(hour=12, minute=0)  # Sat → Mon 12:00
-    return start_dt.isoformat(), end_dt.isoformat()
+    start_dt = (base + timedelta(days=days_until_sat)).replace(hour=9, minute=0)
+    return start_dt.isoformat()
 
-
-# --------------------------------------------------------------------
-# Naming helper: video### from filename
-# --------------------------------------------------------------------
 def unity_creative_name_from_filename(filename: str) -> str:
-    """
-    Build a Unity creative/pack name like 'video123' from a filename.
-    - If the name contains a 3-digit code (e.g. 'video123_9x16.mp4', '123.mp4'),
-      it uses that → 'video123'.
-    - If no 3-digit code is found, it falls back to 'video000'.
-    """
-    stem = pathlib.Path(filename).stem  # drop extension
-    # last 3-digit group in the stem (e.g. 123 from video123_9x16)
+    stem = pathlib.Path(filename).stem
     m = re.search(r"(\d{3})(?!.*\d)", stem)
     code = m.group(1) if m else "000"
     return f"video{code}"
 
+# --------------------------------------------------------------------
+# API Helpers with IMPROVED Rate Limiting
+# --------------------------------------------------------------------
+def _unity_headers() -> dict:
+    if not UNITY_AUTH_HEADER_DEFAULT:
+        raise RuntimeError("unity.authorization_header is missing in secrets.toml")
+    return {"Authorization": UNITY_AUTH_HEADER_DEFAULT, "Content-Type": "application/json"}
+
+def _unity_post(path: str, json_body: dict) -> dict:
+    url = f"{UNITY_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    last_error: Exception | None = None
+
+    for attempt in range(8):
+        try:
+            resp = requests.post(url, headers=_unity_headers(), json=json_body, timeout=60)
+            
+            if resp.status_code == 429:
+                detail = resp.text[:400]
+                if "quota" in detail.lower():
+                    raise RuntimeError(f"Unity Quota Exceeded (STOPPING): {detail}")
+                
+                sleep_sec = 2 ** (attempt + 1)
+                logger.warning(f"Unity 429 Rate Limit (attempt {attempt+1}/8). Sleeping {sleep_sec}s...")
+                time.sleep(sleep_sec)
+                continue
+
+            if not resp.ok:
+                raise RuntimeError(f"Unity POST {path} failed ({resp.status_code}): {resp.text[:400]}")
+
+            return resp.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Request failed: {e}. Retrying...")
+            time.sleep(2)
+            last_error = e
+
+    raise last_error or RuntimeError(f"Unity POST {path} failed after retries.")
+
+def _unity_put(path: str, json_body: dict) -> dict:
+    url = f"{UNITY_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    resp = requests.put(url, headers=_unity_headers(), json=json_body, timeout=60)
+    if not resp.ok:
+        raise RuntimeError(f"Unity PUT {path} failed ({resp.status_code}): {resp.text[:400]}")
+    return resp.json()
+
+def _unity_get(path: str, params: dict | None = None) -> dict:
+    url = f"{UNITY_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    resp = requests.get(url, headers=_unity_headers(), params=params or {}, timeout=60)
+    if not resp.ok:
+        raise RuntimeError(f"Unity GET {path} failed ({resp.status_code}): {resp.text[:400]}")
+    return resp.json()
+
+def _unity_delete(path: str) -> None:
+    url = f"{UNITY_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    resp = requests.delete(url, headers=_unity_headers(), timeout=60)
+    if not resp.ok:
+        raise RuntimeError(f"Unity DELETE {path} failed ({resp.status_code}): {resp.text[:400]}")
 
 # --------------------------------------------------------------------
-# Unity settings UI (right column per game)
+# Creative Helpers
 # --------------------------------------------------------------------
-def render_unity_settings_panel(right_col, game: str, idx: int) -> None:
-    """
-    Render the Unity Ads settings panel on the right side for a single game tab.
+def _unity_list_assigned_creative_packs(*, org_id: str, title_id: str, campaign_id: str) -> List[dict]:
+    path = f"organizations/{org_id}/apps/{title_id}/campaigns/{campaign_id}/assigned-creative-packs"
+    
+    # 1. No limit param (as it caused 400 error)
+    meta = _unity_get(path)
 
-    right_col: Streamlit container (the right column).
-    game:     Game name (used as key in session_state).
-    idx:      Tab index, only used to keep widget keys unique.
-    """
-    _ensure_unity_settings_state()
+    # 2. DEBUG LOG: See exactly what Unity returns
+    logger.info(f"DEBUG: Raw Assigned Packs Response: {json.dumps(meta)}")
 
-    with right_col:
-        st.markdown(f"### {game} Unity Settings")
+    if isinstance(meta, list): 
+        return meta
+    
+    if isinstance(meta, dict):
+        # Check all known variations
+        if isinstance(meta.get("results"), list): return meta["results"]
+        if isinstance(meta.get("items"), list): return meta["items"]
+        if isinstance(meta.get("data"), list): return meta["data"]
+        
+        # Fallback: flatten any list found
+        for v in meta.values():
+            if isinstance(v, list): return v
 
-        cur = st.session_state.unity_settings.get(game, {})
+    return []
 
-        unity_title_id = st.text_input(
-            "Unity Title ID",
-            value=cur.get("title_id", ""),
-            key=f"unity_title_{idx}",
-            help="각 게임의 Unity Ads(ironSource) Title ID",
-        )
+def _unity_assign_creative_pack(*, org_id: str, title_id: str, campaign_id: str, creative_pack_id: str) -> None:
+    path = f"organizations/{org_id}/apps/{title_id}/campaigns/{campaign_id}/assigned-creative-packs"
+    _unity_post(path, {"id": creative_pack_id})
 
-        unity_campaign_id = st.text_input(
-            "기본 Campaign ID (선택)",
-            value=cur.get("campaign_id", ""),
-            key=f"unity_campaign_{idx}",
-            help="이 캠페인 설정을 복사해서 크리에이티브 테스트를 만들고 싶을 때 사용 (선택).",
-        )
+def _unity_unassign_creative_pack(*, org_id: str, title_id: str, campaign_id: str, assigned_creative_pack_id: str) -> None:
+    path = f"organizations/{org_id}/apps/{title_id}/campaigns/{campaign_id}/assigned-creative-packs/{assigned_creative_pack_id}"
+    _unity_delete(path)
 
-        unity_org_id = st.text_input(
-            "Unity Org ID",
-            value=cur.get("org_id", ""),
-            key=f"unity_org_{idx}",
-            help="서비스 계정이 속한 Organization ID",
-        )
+def _unity_get_creative(*, org_id: str, title_id: str, creative_id: str) -> dict:
+    """Fetch details of a single creative to validate its type."""
+    path = f"organizations/{org_id}/apps/{title_id}/creatives/{creative_id}"
+    return _unity_get(path)
 
-        unity_client_id = st.text_input(
-            "Unity Service client_id",
-            value=cur.get("client_id", ""),
-            key=f"unity_client_id_{idx}",
-        )
+def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str, name: str, language: str = "en") -> str:
+    if not os.path.isfile(video_path):
+        raise RuntimeError(f"Video path does not exist: {video_path!r}")
 
-        unity_client_secret = st.text_input(
-            "Unity Service client_secret",
-            value=cur.get("client_secret", ""),
-            key=f"unity_client_secret_{idx}",
-            type="password",
-        )
+    # FIX: Do not use the temp file path for the 'fileName' metadata.
+    # Use the 'name' argument (which contains the original filename)
+    # ensuring it ends with .mp4 for safety.
+    display_filename = name
+    if not display_filename.lower().endswith(".mp4"):
+        display_filename += ".mp4"
 
-        unity_daily_budget = st.number_input(
-            "Unity 일일 예산 (USD, 선택)",
-            min_value=0,
-            value=int(cur.get("daily_budget_usd", 0)),
-            key=f"unity_budget_{idx}",
-        )
+    creative_info = {
+        "name": name, 
+        "language": language, 
+        "video": {"fileName": display_filename} # <--- IMPORTANT FIX
+    }
+    
+    url = f"{UNITY_BASE_URL.rstrip('/')}/organizations/{org_id}/apps/{title_id}/creatives"
+    headers = {"Authorization": UNITY_AUTH_HEADER_DEFAULT}
 
-        # Save updated values back into session_state
-        st.session_state.unity_settings[game] = {
-            "title_id": unity_title_id.strip(),
-            "campaign_id": unity_campaign_id.strip(),
-            "org_id": unity_org_id.strip(),
-            "client_id": unity_client_id.strip(),
-            "client_secret": unity_client_secret.strip(),
-            "daily_budget_usd": int(unity_daily_budget),
-        }
+    for attempt in range(8):
+        try:
+            with open(video_path, "rb") as f:
+                files = {
+                    "creativeInfo": (None, json.dumps(creative_info), "application/json"),
+                    "videoFile": (display_filename, f, "video/mp4"), # Pass display name here too
+                }
+                resp = requests.post(url, headers=headers, files=files, timeout=300)
 
+            if resp.status_code == 429:
+                detail = (resp.text or "")[:400].lower()
+                if "quota" in detail:
+                    raise RuntimeError(f"Unity Quota Exceeded (STOPPING): {detail}")
+                
+                sleep_sec = 5 * (attempt + 1)
+                logger.warning(f"Unity Video Upload Rate Limit (attempt {attempt+1}). Sleeping {sleep_sec}s...")
+                time.sleep(sleep_sec)
+                continue
+
+            if not resp.ok:
+                raise RuntimeError(f"Unity create creative failed ({resp.status_code}): {resp.text[:400]}")
+
+            body = resp.json()
+            return str(body.get("id") or body.get("creativeId"))
+        except Exception as e:
+            if "Quota Exceeded" in str(e): raise e
+            logger.warning(f"Video upload exception: {e}. Retrying...")
+            time.sleep(5)
+
+    raise RuntimeError("Unity create creative failed after multiple retries.")
+
+def _unity_create_playable_creative(*, org_id: str, title_id: str, playable_path: str, name: str, language: str = "en") -> str:
+    if not os.path.isfile(playable_path):
+        raise RuntimeError(f"Playable path does not exist: {playable_path!r}")
+
+    file_name = os.path.basename(playable_path)
+    creative_info = {"name": name, "language": language, "playable": {"fileName": file_name}}
+    url = f"{UNITY_BASE_URL.rstrip('/')}/organizations/{org_id}/apps/{title_id}/creatives"
+    headers = {"Authorization": UNITY_AUTH_HEADER_DEFAULT}
+
+    for attempt in range(8):
+        try:
+            with open(playable_path, "rb") as f:
+                files = {
+                    "creativeInfo": (None, json.dumps(creative_info), "application/json"),
+                    "playableFile": (file_name, f, "text/html"),
+                }
+                resp = requests.post(url, headers=headers, files=files, timeout=300)
+
+            if resp.status_code == 429:
+                detail = resp.text[:400]
+                sleep_sec = 3 * (attempt + 1)
+                time.sleep(sleep_sec)
+                continue
+
+            if not resp.ok:
+                raise RuntimeError(f"Unity create playable failed ({resp.status_code}): {resp.text[:400]}")
+
+            body = resp.json()
+            return str(body.get("id") or body.get("creativeId"))
+        except Exception as e:
+            logger.warning(f"Playable upload exception: {e}. Retrying...")
+            time.sleep(3)
+
+    raise RuntimeError("Unity create playable creative failed after retries.")
+
+def _unity_create_creative_pack(*, org_id: str, title_id: str, pack_name: str, creative_ids: List[str], pack_type: str = "video") -> str:
+    clean_ids = [str(x) for x in creative_ids if x]
+    
+    if len(clean_ids) < 2:
+        raise RuntimeError(f"Not enough creative IDs to create a pack: {clean_ids}")
+
+    payload = {
+        "name": pack_name,
+        "creativeIds": clean_ids,
+        "type": pack_type,
+    }
+
+    path = f"organizations/{org_id}/apps/{title_id}/creative-packs"
+    meta = _unity_post(path, payload)
+    
+    creative_pack_id = meta.get("id") or meta.get("creativePackId")
+    if not creative_pack_id:
+        raise RuntimeError(f"Unity creative pack response missing id: {meta}")
+
+    return str(creative_pack_id)
+
+def _unity_list_playable_creatives(*, org_id: str, title_id: str) -> List[dict]:
+    """Lists creatives ensuring they are actually Playables."""
+    path = f"organizations/{org_id}/apps/{title_id}/creatives"
+    meta = _unity_get(path)
+
+    items: List[dict] = []
+    if isinstance(meta, list): items = meta
+    elif isinstance(meta, dict):
+        if isinstance(meta.get("items"), list): items = meta["items"]
+        elif isinstance(meta.get("data"), list): items = meta["data"]
+        else:
+            for v in meta.values():
+                if isinstance(v, list): items.extend(v)
+
+    playables: List[dict] = []
+    for cr in items:
+        if not isinstance(cr, dict): continue
+        t = (cr.get("type") or "").lower()
+        
+        # STRICT FILTER: Only allow types that are explicitly playables
+        if "playable" in t or "cpe" in t:
+             playables.append(cr)
+
+    return playables
 
 # --------------------------------------------------------------------
-# Main Unity upload entry point used by streamlit_app.py
+# Main Helpers
 # --------------------------------------------------------------------
-def upload_unity_creatives_to_campaign(
-    *,
-    game: str,
-    videos: List[Dict[str, Any]],
-    settings: Dict[str, Any],
-) -> Dict[str, Any]:
-    """
-    Take imported videos for a game and prepare a Unity campaign update.
 
-    This function currently:
-      - Validates required Unity settings (title_id, campaign_id, org/client).
-      - Computes default start/end (next Sat 00:00 → next Mon 12:00 KST).
-      - Derives creative pack names like 'video123' from each filename.
-      - Returns a summary dict used by the Streamlit UI.
-
-    TODO (when you plug in the real Unity Advertising Management API):
-      1) Get an access token using org_id / client_id / client_secret.
-      2) For each video:
-         - Upload the asset for the given title_id.
-         - Create a creative pack with name = unity_creative_name_from_filename(name).
-      3) Update the target campaign:
-         - Unassign previous creatives.
-         - Assign the new ones.
-         - Set start/end dates and enable auto-start.
-    """
-    # ---- 1) Validate settings ----
-    title_id = (settings.get("title_id") or "").strip()
+def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+    title_id = (settings.get("title_id") or "").strip() or str(UNITY_GAME_IDS.get(game, ""))
     campaign_id = (settings.get("campaign_id") or "").strip()
-    org_id = (settings.get("org_id") or "").strip()
-    client_id = (settings.get("client_id") or "").strip()
-    client_secret = (settings.get("client_secret") or "").strip()
-    daily_budget_usd = int(settings.get("daily_budget_usd") or 0)
-
-    missing = []
-    if not title_id:
-        missing.append("Unity Title ID")
     if not campaign_id:
-        missing.append("Campaign ID")
-    if not org_id:
-        missing.append("Org ID")
-    if not client_id:
-        missing.append("Service client_id")
-    if not client_secret:
-        missing.append("Service client_secret")
+        ids_for_game = UNITY_CAMPAIGN_IDS.get(game) or []
+        if ids_for_game: campaign_id = str(ids_for_game[0])
+    
+    org_id = (settings.get("org_id") or "").strip() or UNITY_ORG_ID_DEFAULT
+    
+    if not all([title_id, campaign_id, org_id]):
+        raise RuntimeError("Unity Settings Missing for upload.")
 
-    if missing:
-        raise RuntimeError(
-            "Unity Ads 설정이 부족합니다. 다음 항목을 채워주세요:\n- "
-            + "\n- ".join(missing)
-        )
+    start_iso = next_sat_0000_kst()
+    new_creative_pack_ids: List[str] = []
+    errors: List[str] = []
 
-    # ---- 2) Compute schedule (next Sat → next Mon) ----
-    start_iso, end_iso = next_sat_0000_and_mon_1200_kst()
+    # 1. PLAYABLE HANDLING
+    playable_name = settings.get("selected_playable") or ""
+    existing_playable_id = settings.get("existing_playable_id") or ""
+    playable_creative_id: str | None = None
 
-    # ---- 3) Derive creative names: video### ----
-    creative_names: List[str] = []
+    if playable_name:
+        playable_item = next((v for v in (videos or []) if v.get("name") == playable_name), None)
+        if playable_item:
+            try:
+                playable_creative_id = _unity_create_playable_creative(
+                    org_id=org_id, title_id=title_id, playable_path=playable_item["path"], name=playable_name
+                )
+            except Exception as e:
+                errors.append(f"Playable creation failed: {e}")
+                playable_creative_id = None
+
+    if not playable_creative_id and existing_playable_id:
+        playable_creative_id = str(existing_playable_id)
+
+    # ------------------------------------------------------------------
+    # CHECK: Validate the Playable ID 
+    # ------------------------------------------------------------------
+    if playable_creative_id:
+        try:
+            logger.info(f"Validating Playable ID: {playable_creative_id}")
+            p_details = _unity_get_creative(org_id=org_id, title_id=title_id, creative_id=playable_creative_id)
+            p_type = (p_details.get("type") or "").lower()
+            
+            # Allow standard 'playable' and 'cpe' (Cost Per Engagement) types
+            if "playable" not in p_type and "cpe" not in p_type:
+                error_msg = (
+                    f"CRITICAL ERROR: Selected Playable ID ({playable_creative_id}) "
+                    f"is type '{p_type}'. Unity requires a 'playable' type for End Cards."
+                )
+                logger.error(error_msg)
+                errors.append(error_msg)
+                return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+            
+            logger.info(f"Playable ID validated successfully. Type: {p_type}")
+
+        except Exception as e:
+            errors.append(f"Could not validate Playable ID: {e}")
+            return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+    else:
+        errors.append("No Playable End Card selected.")
+        return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+
+    # 2. VIDEO PAIRING
+    subjects: dict[str, list[dict]] = {}
     for v in videos or []:
-        # videos from Drive import are dicts: {"name": ..., "path": ...}
-        name = v.get("name") or "video000.mp4"
-        creative_name = unity_creative_name_from_filename(name)
-        creative_names.append(creative_name)
+        n = v.get("name") or ""
+        if "playable" in n.lower(): continue 
+        base = n.split("_")[0] 
+        subjects.setdefault(base, []).append(v)
 
-    # Log for debugging inside Streamlit (optional)
-    logger.info(
-        "Unity upload plan for game=%s, campaign=%s: %d videos -> %s",
-        game,
-        campaign_id,
-        len(creative_names),
-        creative_names,
-    )
+    total_pairs = len(subjects)
+    progress = None
+    processed = 0
+    if total_pairs:
+        progress = st.progress(0, text=f"Unity Packs: 0/{total_pairs} 처리 중…")
 
-    # ------------------------------------------------------------------
-    # 4) TODO: real Unity API calls go here
-    # ------------------------------------------------------------------
-    #
-    # Pseudo-code (fill in with real endpoints from Unity docs):
-    #
-    #   token = _unity_get_access_token(org_id, client_id, client_secret)
-    #
-    #   new_creative_ids = []
-    #   for video, cname in zip(videos, creative_names):
-    #       asset_id = _unity_upload_video_asset(token, title_id, video["path"])
-    #       creative_id = _unity_create_creative_pack(
-    #           token=token,
-    #           title_id=title_id,
-    #           name=cname,
-    #           asset_id=asset_id,
-    #       )
-    #       new_creative_ids.append(creative_id)
-    #
-    #   removed_ids = _unity_update_campaign_creatives(
-    #       token=token,
-    #       campaign_id=campaign_id,
-    #       new_creative_ids=new_creative_ids,
-    #   )
-    #
-    #   _unity_update_campaign_schedule(
-    #       token=token,
-    #       campaign_id=campaign_id,
-    #       start=start_iso,
-    #       end=end_iso,
-    #       daily_budget_usd=daily_budget_usd,
-    #       auto_start=True,
-    #   )
-    #
-    # For now we just simulate the response so the Streamlit UI works.
+    # 3. PROCESSING LOOP
+    for base, items in subjects.items():
+        time.sleep(2) 
 
-    simulated_creative_ids = creative_names  # stand-in until real IDs exist
-    removed_ids: List[str] = []  # will be real IDs once you implement removal
-    errors: List[str] = []       # collect API errors here later
+        portrait = next((x for x in items if "1080x1920" in (x.get("name") or "")), None)
+        landscape = next((x for x in items if "1920x1080" in (x.get("name") or "")), None)
+
+        if not portrait or not landscape:
+            errors.append(f"{base}: Missing Portrait or Landscape video.")
+            processed += 1
+            if progress: progress.progress(int(processed/total_pairs*100))
+            continue
+        
+        # --- NEW NAMING LOGIC ---
+        # 1. Clean the video base (usually already clean, e.g., "video484")
+        clean_base = base.replace("_", "")
+
+        # 2. Clean the playable name
+        #    Input example: "playable002_variation1_unityads.html"
+        raw_p_name = ""
+        if playable_name:
+            raw_p_name = playable_name
+        elif settings.get("existing_playable_label"):
+             # Drop the ID part " (ID...)"
+            raw_p_name = settings.get("existing_playable_label", "").split(" ")[0]
+
+        # Remove extension
+        clean_p = pathlib.Path(raw_p_name).stem 
+        # Remove specific suffix
+        clean_p = clean_p.replace("_unityads", "") 
+        # Remove underscores
+        clean_p = clean_p.replace("_", "")
+        
+        # Combine: video484playable002variation1
+        final_pack_name = f"{clean_base}{clean_p}"
+        # ------------------------
+
+        try:
+            # Create Videos
+            p_id = _unity_create_video_creative(
+                org_id=org_id, title_id=title_id, video_path=portrait["path"], name=portrait["name"]
+            )
+            time.sleep(2)
+            l_id = _unity_create_video_creative(
+                org_id=org_id, title_id=title_id, video_path=landscape["path"], name=landscape["name"]
+            )
+
+            # Create Pack [Portrait, Landscape, Playable]
+            pack_creatives = [p_id, l_id, playable_creative_id]
+            
+            # Create pack with "video+playable" type
+            pack_id = _unity_create_creative_pack(
+                org_id=org_id,
+                title_id=title_id,
+                pack_name=final_pack_name, 
+                creative_ids=pack_creatives,
+                pack_type="video+playable"
+            )
+            new_creative_pack_ids.append(pack_id)
+
+        except Exception as e:
+            msg = str(e)
+            if "Quota Exceeded" in msg:
+                errors.append(f"FATAL: {msg}")
+                break 
+            logger.exception(f"Unity pack creation failed for {base}")
+            errors.append(f"{base}: {msg}")
+
+        finally:
+            processed += 1
+            if progress: progress.progress(int(processed/total_pairs*100), text=f"Unity Packs: {processed}/{total_pairs}")
+
+    if progress: progress.empty()
 
     return {
         "game": game,
         "campaign_id": campaign_id,
-        "title_id": title_id,
         "start_iso": start_iso,
-        "end_iso": end_iso,
-        "daily_budget_usd": daily_budget_usd,
-        "creative_ids": simulated_creative_ids,
-        "removed_ids": removed_ids,
+        "creative_ids": new_creative_pack_ids,
+        "errors": errors,
+        "removed_ids": [],
+    }
+
+def apply_unity_creative_packs_to_campaign(*, game: str, creative_pack_ids: List[str], settings: Dict[str, Any]) -> Dict[str, Any]:
+    if not creative_pack_ids:
+        raise RuntimeError("No creative pack IDs to apply.")
+
+    title_id = (settings.get("title_id") or "").strip() or str(UNITY_GAME_IDS.get(game, ""))
+    campaign_id = (settings.get("campaign_id") or "").strip()
+    if not campaign_id:
+        ids_for_game = UNITY_CAMPAIGN_IDS.get(game) or []
+        if ids_for_game: campaign_id = str(ids_for_game[0])
+    org_id = (settings.get("org_id") or "").strip() or UNITY_ORG_ID_DEFAULT
+
+    if not all([title_id, campaign_id, org_id]):
+         raise RuntimeError("Unity settings missing for apply step.")
+
+    removed_ids: List[str] = []
+    assigned_packs: List[str] = []
+    errors: List[str] = []
+
+    # 1. Unassign existing
+    try:
+        assigned = _unity_list_assigned_creative_packs(org_id=org_id, title_id=title_id, campaign_id=campaign_id)
+        for item in assigned:
+            assigned_id = item.get("id") or item.get("assignedCreativePackId")
+            if assigned_id:
+                try:
+                    _unity_unassign_creative_pack(org_id=org_id, title_id=title_id, campaign_id=campaign_id, assigned_creative_pack_id=str(assigned_id))
+                    removed_ids.append(str(assigned_id))
+                    time.sleep(0.5) 
+                except Exception as e:
+                    errors.append(f"Unassign error {assigned_id}: {e}")
+    except Exception as e:
+        errors.append(f"List assigned error: {e}")
+
+    # 2. Assign new
+    for pack_id in creative_pack_ids:
+        try:
+            _unity_assign_creative_pack(org_id=org_id, title_id=title_id, campaign_id=campaign_id, creative_pack_id=str(pack_id))
+            assigned_packs.append(str(pack_id))
+            time.sleep(0.5) 
+        except Exception as e:
+            errors.append(f"Assign error {pack_id}: {e}")
+
+    return {
+        "game": game,
+        "campaign_id": campaign_id,
+        "assigned_packs": assigned_packs,
+        "removed_assignments": removed_ids,
         "errors": errors,
     }

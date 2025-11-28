@@ -5,4 +5,3 @@ maxUploadSize = 1024
 maxMessageSize = 1024
 address = "0.0.0.0"
 port = 8501
-enableCORS = false
