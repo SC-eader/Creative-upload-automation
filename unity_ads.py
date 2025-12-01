@@ -123,7 +123,7 @@ def render_unity_settings_panel(right_col, game: str, idx: int) -> None:
             title_for_list = (unity_title_id or secret_title_id).strip()
 
             if org_for_list and title_for_list:
-                # IMPORTANT: Fetch STRICT Playables only
+                # STRICT FILTER: Playables only
                 playable_creatives = _unity_list_playable_creatives(org_id=org_for_list, title_id=title_for_list)
                 for cr in playable_creatives:
                     cr_id = str(cr.get("id") or "")
@@ -185,7 +185,7 @@ def unity_creative_name_from_filename(filename: str) -> str:
     return f"video{code}"
 
 # --------------------------------------------------------------------
-# API Helpers with IMPROVED Rate Limiting
+# API Helpers
 # --------------------------------------------------------------------
 def _unity_headers() -> dict:
     if not UNITY_AUTH_HEADER_DEFAULT:
@@ -250,19 +250,14 @@ def _unity_list_assigned_creative_packs(*, org_id: str, title_id: str, campaign_
     # 1. No limit param (as it caused 400 error)
     meta = _unity_get(path)
 
-    # 2. DEBUG LOG: See exactly what Unity returns
-    logger.info(f"DEBUG: Raw Assigned Packs Response: {json.dumps(meta)}")
-
-    if isinstance(meta, list): 
-        return meta
-    
+    # 2. Return the correct list structure
+    if isinstance(meta, list): return meta
     if isinstance(meta, dict):
-        # Check all known variations
+        # FIX: Check 'results' which is standard for this API
         if isinstance(meta.get("results"), list): return meta["results"]
         if isinstance(meta.get("items"), list): return meta["items"]
         if isinstance(meta.get("data"), list): return meta["data"]
         
-        # Fallback: flatten any list found
         for v in meta.values():
             if isinstance(v, list): return v
 
@@ -277,7 +272,6 @@ def _unity_unassign_creative_pack(*, org_id: str, title_id: str, campaign_id: st
     _unity_delete(path)
 
 def _unity_get_creative(*, org_id: str, title_id: str, creative_id: str) -> dict:
-    """Fetch details of a single creative to validate its type."""
     path = f"organizations/{org_id}/apps/{title_id}/creatives/{creative_id}"
     return _unity_get(path)
 
@@ -285,9 +279,7 @@ def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str,
     if not os.path.isfile(video_path):
         raise RuntimeError(f"Video path does not exist: {video_path!r}")
 
-    # FIX: Do not use the temp file path for the 'fileName' metadata.
-    # Use the 'name' argument (which contains the original filename)
-    # ensuring it ends with .mp4 for safety.
+    # FIX: Use original name for fileName, not temp file path
     display_filename = name
     if not display_filename.lower().endswith(".mp4"):
         display_filename += ".mp4"
@@ -295,7 +287,7 @@ def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str,
     creative_info = {
         "name": name, 
         "language": language, 
-        "video": {"fileName": display_filename} # <--- IMPORTANT FIX
+        "video": {"fileName": display_filename}
     }
     
     url = f"{UNITY_BASE_URL.rstrip('/')}/organizations/{org_id}/apps/{title_id}/creatives"
@@ -306,7 +298,7 @@ def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str,
             with open(video_path, "rb") as f:
                 files = {
                     "creativeInfo": (None, json.dumps(creative_info), "application/json"),
-                    "videoFile": (display_filename, f, "video/mp4"), # Pass display name here too
+                    "videoFile": (display_filename, f, "video/mp4"),
                 }
                 resp = requests.post(url, headers=headers, files=files, timeout=300)
 
@@ -314,9 +306,7 @@ def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str,
                 detail = (resp.text or "")[:400].lower()
                 if "quota" in detail:
                     raise RuntimeError(f"Unity Quota Exceeded (STOPPING): {detail}")
-                
                 sleep_sec = 5 * (attempt + 1)
-                logger.warning(f"Unity Video Upload Rate Limit (attempt {attempt+1}). Sleeping {sleep_sec}s...")
                 time.sleep(sleep_sec)
                 continue
 
@@ -327,7 +317,6 @@ def _unity_create_video_creative(*, org_id: str, title_id: str, video_path: str,
             return str(body.get("id") or body.get("creativeId"))
         except Exception as e:
             if "Quota Exceeded" in str(e): raise e
-            logger.warning(f"Video upload exception: {e}. Retrying...")
             time.sleep(5)
 
     raise RuntimeError("Unity create creative failed after multiple retries.")
@@ -351,9 +340,7 @@ def _unity_create_playable_creative(*, org_id: str, title_id: str, playable_path
                 resp = requests.post(url, headers=headers, files=files, timeout=300)
 
             if resp.status_code == 429:
-                detail = resp.text[:400]
-                sleep_sec = 3 * (attempt + 1)
-                time.sleep(sleep_sec)
+                time.sleep(3 * (attempt + 1))
                 continue
 
             if not resp.ok:
@@ -362,7 +349,6 @@ def _unity_create_playable_creative(*, org_id: str, title_id: str, playable_path
             body = resp.json()
             return str(body.get("id") or body.get("creativeId"))
         except Exception as e:
-            logger.warning(f"Playable upload exception: {e}. Retrying...")
             time.sleep(3)
 
     raise RuntimeError("Unity create playable creative failed after retries.")
@@ -389,7 +375,6 @@ def _unity_create_creative_pack(*, org_id: str, title_id: str, pack_name: str, c
     return str(creative_pack_id)
 
 def _unity_list_playable_creatives(*, org_id: str, title_id: str) -> List[dict]:
-    """Lists creatives ensuring they are actually Playables."""
     path = f"organizations/{org_id}/apps/{title_id}/creatives"
     meta = _unity_get(path)
 
@@ -406,8 +391,6 @@ def _unity_list_playable_creatives(*, org_id: str, title_id: str) -> List[dict]:
     for cr in items:
         if not isinstance(cr, dict): continue
         t = (cr.get("type") or "").lower()
-        
-        # STRICT FILTER: Only allow types that are explicitly playables
         if "playable" in t or "cpe" in t:
              playables.append(cr)
 
@@ -452,27 +435,17 @@ def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]
     if not playable_creative_id and existing_playable_id:
         playable_creative_id = str(existing_playable_id)
 
-    # ------------------------------------------------------------------
-    # CHECK: Validate the Playable ID 
-    # ------------------------------------------------------------------
+    # Validate Playable ID
     if playable_creative_id:
         try:
             logger.info(f"Validating Playable ID: {playable_creative_id}")
             p_details = _unity_get_creative(org_id=org_id, title_id=title_id, creative_id=playable_creative_id)
             p_type = (p_details.get("type") or "").lower()
             
-            # Allow standard 'playable' and 'cpe' (Cost Per Engagement) types
             if "playable" not in p_type and "cpe" not in p_type:
-                error_msg = (
-                    f"CRITICAL ERROR: Selected Playable ID ({playable_creative_id}) "
-                    f"is type '{p_type}'. Unity requires a 'playable' type for End Cards."
-                )
-                logger.error(error_msg)
+                error_msg = f"CRITICAL: Playable ID ({playable_creative_id}) is type '{p_type}'. Must be 'playable'."
                 errors.append(error_msg)
                 return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
-            
-            logger.info(f"Playable ID validated successfully. Type: {p_type}")
-
         except Exception as e:
             errors.append(f"Could not validate Playable ID: {e}")
             return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
@@ -481,70 +454,63 @@ def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]
         return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
 
     # 2. VIDEO PAIRING
+    # 2. VIDEO PAIRING
     subjects: dict[str, list[dict]] = {}
     for v in videos or []:
         n = v.get("name") or ""
+        # IMPORTANT: Exclude files named "playable" from being uploaded as VIDEO creatives
         if "playable" in n.lower(): continue 
         base = n.split("_")[0] 
         subjects.setdefault(base, []).append(v)
 
     total_pairs = len(subjects)
-    progress = None
-    processed = 0
-    if total_pairs:
-        progress = st.progress(0, text=f"Unity Packs: 0/{total_pairs} 처리 중…")
+    progress_bar = None
+    processed_count = 0
+    
+    if total_pairs > 0:
+        progress_bar = st.progress(0, text=f"Creative Pack 생성 준비 중 (0/{total_pairs})...")
 
     # 3. PROCESSING LOOP
     for base, items in subjects.items():
-        time.sleep(2) 
+        time.sleep(2) # Throttle API calls
 
         portrait = next((x for x in items if "1080x1920" in (x.get("name") or "")), None)
         landscape = next((x for x in items if "1920x1080" in (x.get("name") or "")), None)
 
         if not portrait or not landscape:
             errors.append(f"{base}: Missing Portrait or Landscape video.")
-            processed += 1
-            if progress: progress.progress(int(processed/total_pairs*100))
+            processed_count += 1
+            if progress_bar:
+                pct = int(processed_count / total_pairs * 100)
+                progress_bar.progress(pct, text=f"Skipping {base} (Missing video) - {processed_count}/{total_pairs}")
             continue
         
-        # --- NEW NAMING LOGIC ---
-        # 1. Clean the video base (usually already clean, e.g., "video484")
+        # --- CLEAN NAMING LOGIC ---
         clean_base = base.replace("_", "")
-
-        # 2. Clean the playable name
-        #    Input example: "playable002_variation1_unityads.html"
-        raw_p_name = ""
-        if playable_name:
-            raw_p_name = playable_name
-        elif settings.get("existing_playable_label"):
-             # Drop the ID part " (ID...)"
-            raw_p_name = settings.get("existing_playable_label", "").split(" ")[0]
-
-        # Remove extension
-        clean_p = pathlib.Path(raw_p_name).stem 
-        # Remove specific suffix
-        clean_p = clean_p.replace("_unityads", "") 
-        # Remove underscores
-        clean_p = clean_p.replace("_", "")
-        
-        # Combine: video484playable002variation1
+        raw_p_name = playable_name if playable_name else settings.get("existing_playable_label", "").split(" ")[0]
+        clean_p = pathlib.Path(raw_p_name).stem.replace("_unityads", "").replace("_", "")
         final_pack_name = f"{clean_base}{clean_p}"
-        # ------------------------
+        # --------------------------
 
         try:
+            if progress_bar:
+                progress_bar.progress(
+                    int(processed_count / total_pairs * 100), 
+                    text=f"Uploading videos for {base} ({processed_count + 1}/{total_pairs})..."
+                )
+
             # Create Videos
             p_id = _unity_create_video_creative(
                 org_id=org_id, title_id=title_id, video_path=portrait["path"], name=portrait["name"]
             )
-            time.sleep(2)
+            time.sleep(1) # Small gap between uploads
             l_id = _unity_create_video_creative(
                 org_id=org_id, title_id=title_id, video_path=landscape["path"], name=landscape["name"]
             )
 
-            # Create Pack [Portrait, Landscape, Playable]
             pack_creatives = [p_id, l_id, playable_creative_id]
             
-            # Create pack with "video+playable" type
+            # Create Pack "video+playable"
             pack_id = _unity_create_creative_pack(
                 org_id=org_id,
                 title_id=title_id,
@@ -563,10 +529,13 @@ def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]
             errors.append(f"{base}: {msg}")
 
         finally:
-            processed += 1
-            if progress: progress.progress(int(processed/total_pairs*100), text=f"Unity Packs: {processed}/{total_pairs}")
+            processed_count += 1
+            if progress_bar:
+                pct = int(processed_count / total_pairs * 100)
+                progress_bar.progress(pct, text=f"Completed {processed_count}/{total_pairs} packs")
 
-    if progress: progress.empty()
+    if progress_bar: 
+        progress_bar.empty()
 
     return {
         "game": game,
@@ -583,9 +552,6 @@ def apply_unity_creative_packs_to_campaign(*, game: str, creative_pack_ids: List
 
     title_id = (settings.get("title_id") or "").strip() or str(UNITY_GAME_IDS.get(game, ""))
     campaign_id = (settings.get("campaign_id") or "").strip()
-    if not campaign_id:
-        ids_for_game = UNITY_CAMPAIGN_IDS.get(game) or []
-        if ids_for_game: campaign_id = str(ids_for_game[0])
     org_id = (settings.get("org_id") or "").strip() or UNITY_ORG_ID_DEFAULT
 
     if not all([title_id, campaign_id, org_id]):
@@ -595,29 +561,68 @@ def apply_unity_creative_packs_to_campaign(*, game: str, creative_pack_ids: List
     assigned_packs: List[str] = []
     errors: List[str] = []
 
-    # 1. Unassign existing
-    try:
-        assigned = _unity_list_assigned_creative_packs(org_id=org_id, title_id=title_id, campaign_id=campaign_id)
-        for item in assigned:
-            assigned_id = item.get("id") or item.get("assignedCreativePackId")
-            if assigned_id:
-                try:
-                    _unity_unassign_creative_pack(org_id=org_id, title_id=title_id, campaign_id=campaign_id, assigned_creative_pack_id=str(assigned_id))
-                    removed_ids.append(str(assigned_id))
-                    time.sleep(0.5) 
-                except Exception as e:
-                    errors.append(f"Unassign error {assigned_id}: {e}")
-    except Exception as e:
-        errors.append(f"List assigned error: {e}")
+    # --- PROGRESS BAR FOR APPLY STEP ---
+    progress_bar = st.progress(0, text="Fetching existing assignments...")
+
+    # 1. Unassign existing (Loop to handle pagination)
+    max_loops = 20 # Safety limit
+    loop_count = 0
+    
+    while loop_count < max_loops:
+        try:
+            assigned = _unity_list_assigned_creative_packs(org_id=org_id, title_id=title_id, campaign_id=campaign_id)
+            if not assigned:
+                break
+                
+            total_unassign = len(assigned)
+            loop_count += 1
+            
+            for idx, item in enumerate(assigned):
+                assigned_id = item.get("id") or item.get("assignedCreativePackId")
+                if assigned_id:
+                    # Update progress bar
+                    progress_bar.progress(
+                        int((idx + 1) / max(total_unassign, 1) * 50), 
+                        text=f"Unassigning batch {loop_count}: {idx + 1}/{total_unassign}..."
+                    )
+                    
+                    try:
+                        _unity_unassign_creative_pack(
+                            org_id=org_id, 
+                            title_id=title_id, 
+                            campaign_id=campaign_id, 
+                            assigned_creative_pack_id=str(assigned_id)
+                        )
+                        removed_ids.append(str(assigned_id))
+                        time.sleep(0.2) # Fast unassign
+                    except Exception as e:
+                        # Continue even if one fails
+                        errors.append(f"Unassign error {assigned_id}: {e}")
+            
+            # Short sleep between pages
+            time.sleep(1)
+            
+        except Exception as e:
+            errors.append(f"List assigned error: {e}")
+            break
 
     # 2. Assign new
+    total_assign = len(creative_pack_ids)
+    count_a = 0
+    
     for pack_id in creative_pack_ids:
+        count_a += 1
+        pct = 50 + int(count_a / max(total_assign, 1) * 50)
+        progress_bar.progress(pct, text=f"Assigning new packs {count_a}/{total_assign}...")
+        
         try:
             _unity_assign_creative_pack(org_id=org_id, title_id=title_id, campaign_id=campaign_id, creative_pack_id=str(pack_id))
             assigned_packs.append(str(pack_id))
             time.sleep(0.5) 
         except Exception as e:
             errors.append(f"Assign error {pack_id}: {e}")
+
+    progress_bar.empty()
 
     return {
         "game": game,
