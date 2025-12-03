@@ -10,6 +10,7 @@ import tempfile
 import os
 
 import requests
+import game_manager  # Ensure this file exists as discussed!
 import streamlit as st
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,9 @@ def next_sat_0900_kst(today: datetime | None = None) -> str:
     """
     Compute start_iso in KST:
       - start: next Saturday 09:00
-    Returned string is ISO8601 with +09:00 offset.
     """
     now = (today or datetime.now(ASIA_SEOUL)).astimezone(ASIA_SEOUL)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # Monday=0 ... Saturday=5, Sunday=6
     days_until_sat = (5 - base.weekday()) % 7 or 7
     start_dt = (base + timedelta(days=days_until_sat)).replace(hour=9, minute=0)
     return start_dt.isoformat()
@@ -36,59 +35,29 @@ def next_sat_0900_kst(today: datetime | None = None) -> str:
 # Settings helpers (store URL, budget, targeting)
 # --------------------------------------------------------------------
 def sanitize_store_url(raw: str) -> str:
-    """
-    Normalize store URLs for Meta:
-      - Google Play: keep ?id=<package> only
-      - App Store: drop query/fragment
-      - Other hosts: return as-is
-    """
     from urllib.parse import urlsplit, urlunsplit, parse_qs, urlencode
-
-    if not raw:
-        return raw
-
+    if not raw: return raw
     parts = urlsplit(raw)
     host = parts.netloc.lower()
-
-    # Google Play: MUST preserve 'id' param only
     if "play.google.com" in host:
         qs = parse_qs(parts.query)
         pkg = (qs.get("id") or [None])[0]
         if not pkg:
-            raise ValueError(
-                "Google Play URL must include ?id=<package>. "
-                "Example: https://play.google.com/store/apps/details?id=io.supercent.weaponrpg"
-            )
+            raise ValueError("Google Play URL must include ?id=<package>.")
         new_query = urlencode({"id": pkg})
-        return urlunsplit(
-            (parts.scheme, parts.netloc, parts.path or "/store/apps/details", new_query, "")
-        )
-
-    # Apple App Store: keep path only
+        return urlunsplit((parts.scheme, parts.netloc, parts.path or "/store/apps/details", new_query, ""))
     if "apps.apple.com" in host:
         return urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-
-    # Other hosts: unchanged
     return raw
 
 def compute_budget_from_settings(files: list, settings: dict, fallback_per_video: int = 10) -> int:
-    """
-    Budget per day = (#eligible videos) × per-video budget.
-    Counts only .mp4/.mpeg4.
-    """
     allowed = {".mp4", ".mpeg4"}
-
-    def _name(u):
-        return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
-
-    n_videos = sum(
-        1 for u in (files or []) if pathlib.Path(_name(u)).suffix.lower() in allowed
-    )
+    def _name(u): return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
+    n_videos = sum(1 for u in (files or []) if pathlib.Path(_name(u)).suffix.lower() in allowed)
     per_video = int(settings.get("budget_per_video_usd", fallback_per_video))
     return max(1, n_videos * per_video) if n_videos else per_video
 
 def dollars_to_minor(usd: float) -> int:
-    """Convert USD → Meta 'minor' units (1 USD → 100)."""
     return int(round(usd * 100))
 
 ANDROID_OS_CHOICES = {
@@ -124,11 +93,6 @@ OPT_GOAL_LABEL_TO_API = {
 }
 
 def build_targeting_from_settings(country: str, age_min: int, settings: dict) -> dict:
-    """
-    Build Meta targeting dict from UI settings.
-    Uses Advantage+ placements (no publisher_platforms/device_platforms),
-    and optional OS-family filtering via user_os.
-    """
     os_choice = settings.get("os_choice", "Both")
     min_android = settings.get("min_android_os_token")
     min_ios = settings.get("min_ios_os_token")
@@ -137,9 +101,7 @@ def build_targeting_from_settings(country: str, age_min: int, settings: dict) ->
         "geo_locations": {"countries": [country]},
         "age_min": max(13, int(age_min)),
     }
-
     user_os: list[str] = []
-
     if os_choice == "Android only":
         token = min_android or "Android_ver_6.0_and_above"
         user_os.append(token)
@@ -147,18 +109,13 @@ def build_targeting_from_settings(country: str, age_min: int, settings: dict) ->
         token = min_ios or "iOS_ver_11.0_and_above"
         user_os.append(token)
     else:  # Both
-        if min_android:
-            user_os.append(min_android)
-        if min_ios:
-            user_os.append(min_ios)
+        if min_android: user_os.append(min_android)
+        if min_ios: user_os.append(min_ios)
 
-    if user_os:
-        targeting["user_os"] = user_os
-
+    if user_os: targeting["user_os"] = user_os
     return targeting
 
 def make_ad_name(filename: str, prefix: str | None) -> str:
-    """Build ad name from filename and optional prefix."""
     return f"{prefix.strip()}_{filename}" if prefix else filename
 
 # --------------------------------------------------------------------
@@ -169,12 +126,11 @@ def _ensure_settings_state() -> None:
         st.session_state.settings = {}
 
 def get_fb_settings(game: str) -> dict:
-    """Return per-game FB settings dict (creating container if needed)."""
     _ensure_settings_state()
     return st.session_state.settings.get(game, {})
 
 # --------------------------------------------------------------------
-# Default per-game App IDs + Store URLs
+# Default per-game App IDs + Store URLs (for Settings Init)
 # --------------------------------------------------------------------
 GAME_DEFAULTS: Dict[str, Dict[str, str]] = {
     "XP HERO": {
@@ -220,10 +176,6 @@ GAME_DEFAULTS: Dict[str, Dict[str, str]] = {
 }
 
 def init_fb_game_defaults() -> None:
-    """
-    Apply FB app_id/store_url defaults per game without overwriting
-    what the user has already saved in st.session_state.settings.
-    """
     _ensure_settings_state()
     for game, defaults in GAME_DEFAULTS.items():
         cur = st.session_state.settings.get(game, {}) or {}
@@ -250,38 +202,25 @@ except Exception as _e:
     FB_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
 def _require_fb() -> None:
-    """Raise a clear error if the Facebook SDK is missing."""
     if not FB_AVAILABLE:
         raise RuntimeError(
-            "facebook-business SDK not available. Install it with:\n"
-            "  pip install facebook-business\n"
-            f"Import error: {FB_IMPORT_ERROR}"
+            "facebook-business SDK not available. Install it with: pip install facebook-business"
         )
 
 def init_fb_from_secrets(ad_account_id: str | None = None) -> "AdAccount":
-    """
-    Initialize Meta SDK using only access_token from st.secrets,
-    and return an AdAccount (default: XP HERO account if none given).
-    """
     _require_fb()
     token = st.secrets.get("access_token", "").strip()
     if not token:
         raise RuntimeError("Missing access_token in st.secrets. Put it in .streamlit/secrets.toml")
 
     FacebookAdsApi.init(access_token=token)
-
-    default_act_id = "act_692755193188182"  # XP HERO default
+    default_act_id = "act_692755193188182"
     act_id = ad_account_id or default_act_id
     return AdAccount(act_id)
 
 def validate_page_binding(account: "AdAccount", page_id: str) -> dict:
-    """
-    Ensure page_id is numeric/readable and fetch IG actor (if present).
-    Returns {'id','name','instagram_business_account_id'}.
-    """
     _require_fb()
     from facebook_business.adobjects.page import Page
-
     pid = str(page_id).strip()
     if not pid.isdigit():
         raise RuntimeError(f"Page ID must be numeric. Got: {page_id!r}")
@@ -289,8 +228,7 @@ def validate_page_binding(account: "AdAccount", page_id: str) -> dict:
         p = Page(pid).api_get(fields=["id", "name", "instagram_business_account"])
     except Exception as e:
         raise RuntimeError(
-            f"Page validation failed for PAGE_ID={pid}. "
-            "Use a real Facebook Page ID and ensure the token can read it."
+            f"Page validation failed for PAGE_ID={pid}. Use a real Facebook Page ID."
         ) from e
     iba = (p.get("instagram_business_account") or {}).get("id")
     return {"id": p["id"], "name": p["name"], "instagram_business_account_id": iba}
@@ -301,11 +239,9 @@ def validate_page_binding(account: "AdAccount", page_id: str) -> dict:
 VERBOSE_UPLOAD_LOG = False
 
 def _fname_any(u) -> str:
-    """Return a filename for either a Streamlit UploadedFile or a {'name','path'} dict."""
     return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
 
 def _dedupe_by_name(files):
-    """Keep first occurrence of each filename (case-insensitive)."""
     seen = set()
     out = []
     for u in files or []:
@@ -316,10 +252,6 @@ def _dedupe_by_name(files):
     return out
 
 def _save_uploadedfile_tmp(u) -> str:
-    """
-    Persist a video source to disk and return its path.
-    Supports UploadedFile and {'name','path'} dicts.
-    """
     if isinstance(u, dict) and "path" in u and "name" in u:
         return u["path"]
     if hasattr(u, "getbuffer"):
@@ -330,7 +262,10 @@ def _save_uploadedfile_tmp(u) -> str:
     raise ValueError("Unsupported video object type for saving.")
 
 # --------------------------------------------------------------------
-# Resumable upload + ad creation
+# Resumable upload + ad creation (For Operations Mode)
+# --------------------------------------------------------------------
+# --------------------------------------------------------------------
+# Resumable upload + ad creation (For Operations Mode)
 # --------------------------------------------------------------------
 def upload_videos_create_ads(
     account: "AdAccount",
@@ -343,12 +278,8 @@ def upload_videos_create_ads(
     store_url: str | None = None,
     try_instagram: bool = True,
 ):
-    """
-    Upload videos (resumable), wait for processing, then create creatives + ads in parallel.
-    Returns a list of {'name','ad_id'} and shows errors in Streamlit UI.
-    """
     from facebook_business.adobjects.advideo import AdVideo
-    from facebook_business.adobjects.page import Page
+    from facebook_business.adobjects.page import Page  # << ADDED THIS IMPORT
     from facebook_business.adobjects.adcreative import AdCreative
     from facebook_business.adobjects.ad import Ad
     from facebook_business.exceptions import FacebookRequestError
@@ -356,7 +287,6 @@ def upload_videos_create_ads(
     import time
 
     allowed = {".mp4", ".mpeg4"}
-
     def _is_video(u):
         n = _fname_any(u) or "video.mp4"
         return pathlib.Path(n).suffix.lower() in allowed
@@ -366,19 +296,8 @@ def upload_videos_create_ads(
     def _persist_to_tmp(u):
         return {"name": _fname_any(u) or "video.mp4", "path": _save_uploadedfile_tmp(u)}
 
-    def simple_video_upload(path: str) -> str:
-        v = account.create_ad_video(params={"file": path, "content_category": "VIDEO_GAMING"})
-        return v["id"]
-
     def upload_video_resumable(path: str) -> str:
-        """
-        Chunked upload to /{act_id}/advideos using the official 3-phase protocol.
-        Retries transient errors and verifies total bytes sent before finishing.
-        """
         token = (st.secrets.get("access_token") or "").strip()
-        if not token:
-            raise RuntimeError("Missing access_token in st.secrets")
-
         act = account.get_id()
         base = f"https://graph.facebook.com/v24.0/{act}/advideos"
         file_size = os.path.getsize(path)
@@ -387,22 +306,15 @@ def upload_videos_create_ads(
             delays = [0, 2, 4, 8, 12]
             last = None
             for i, d in enumerate(delays[:max_retries], 1):
-                if d:
-                    time.sleep(d)
+                if d: time.sleep(d)
                 try:
-                    r = requests.post(
-                        base,
-                        data={**data, "access_token": token},
-                        files=files,
-                        timeout=180,
-                    )
+                    r = requests.post(base, data={**data, "access_token": token}, files=files, timeout=180)
                     if r.status_code >= 500:
                         last = RuntimeError(f"HTTP {r.status_code}: {r.text[:400]}")
                         continue
                     j = r.json()
                     if "error" in j:
-                        code = j["error"].get("code")
-                        if code in (390,) and i < max_retries:
+                        if j["error"].get("code") in (390,) and i < max_retries:
                             last = RuntimeError(j["error"].get("message"))
                             continue
                         raise RuntimeError(j["error"].get("message", str(j["error"])))
@@ -411,33 +323,18 @@ def upload_videos_create_ads(
                     last = e
             raise last or RuntimeError("advideos POST failed")
 
-        start_resp = _post(
-            {"upload_phase": "start", "file_size": str(file_size), "content_category": "VIDEO_GAMING"}
-        )
+        start_resp = _post({"upload_phase": "start", "file_size": str(file_size), "content_category": "VIDEO_GAMING"})
         upload_session_id = start_resp["upload_session_id"]
         video_id = start_resp["video_id"]
         start_offset = int(start_resp.get("start_offset", 0))
         end_offset = int(start_resp.get("end_offset", 0))
-
         sent_bytes = 0
 
         with open(path, "rb") as f:
             while True:
-                if start_offset == end_offset == file_size:
-                    if VERBOSE_UPLOAD_LOG:
-                        st.write(f"[Upload] ✅ All bytes acknowledged ({sent_bytes}/{file_size}).")
-                    break
-
+                if start_offset == end_offset == file_size: break
                 if end_offset <= start_offset:
-                    if VERBOSE_UPLOAD_LOG:
-                        st.write(f"[Upload] ↻ Asking for next window at {start_offset}")
-                    tr = _post(
-                        {
-                            "upload_phase": "transfer",
-                            "upload_session_id": upload_session_id,
-                            "start_offset": str(start_offset),
-                        }
-                    )
+                    tr = _post({"upload_phase": "transfer", "upload_session_id": upload_session_id, "start_offset": str(start_offset)})
                     start_offset = int(tr.get("start_offset", start_offset))
                     end_offset = int(tr.get("end_offset", end_offset or file_size))
                     continue
@@ -445,115 +342,65 @@ def upload_videos_create_ads(
                 to_read = end_offset - start_offset
                 f.seek(start_offset)
                 chunk = f.read(to_read)
-                if not chunk or len(chunk) != to_read:
-                    raise RuntimeError(f"Read {len(chunk) if chunk else 0} bytes; expected {to_read}.")
-
                 files = {"video_file_chunk": ("chunk.bin", chunk, "application/octet-stream")}
-                tr = _post(
-                    {
-                        "upload_phase": "transfer",
-                        "upload_session_id": upload_session_id,
-                        "start_offset": str(start_offset),
-                    },
-                    files=files,
-                )
-
+                tr = _post({"upload_phase": "transfer", "upload_session_id": upload_session_id, "start_offset": str(start_offset)}, files=files)
                 sent_bytes += to_read
-                new_start = int(tr.get("start_offset", start_offset + to_read))
-                new_end = int(tr.get("end_offset", end_offset))
-
-                if VERBOSE_UPLOAD_LOG:
-                    st.write(
-                        f"[Upload] Sent [{start_offset},{end_offset}) → "
-                        f"ack: start={new_start}, end={new_end}, sent={sent_bytes}/{file_size}"
-                    )
-
-                start_offset, end_offset = new_start, new_end
-                if start_offset > file_size:
-                    start_offset = file_size
-                if end_offset > file_size:
-                    end_offset = file_size
-
-        if sent_bytes != file_size:
-            raise RuntimeError(f"Uploaded bytes ({sent_bytes}) != file size ({file_size}).")
+                start_offset = int(tr.get("start_offset", start_offset + to_read))
+                end_offset = int(tr.get("end_offset", end_offset))
+                if start_offset > file_size: start_offset = file_size
+                if end_offset > file_size: end_offset = file_size
 
         try:
             _post({"upload_phase": "finish", "upload_session_id": upload_session_id})
             return video_id
         except Exception:
-            st.info(
-                f"Resumable finish failed for {os.path.basename(path)} — trying fallback upload once."
-            )
             v = account.create_ad_video(params={"file": path, "content_category": "VIDEO_GAMING"})
             return v["id"]
 
     def wait_all_videos_ready(video_ids: list[str], *, timeout_s: int = 120, sleep_s: int = 3) -> dict[str, bool]:
-        """Poll advideo thumbnails for all video_ids to avoid blank previews."""
-        from facebook_business.adobjects.advideo import AdVideo
-        import time
-
         ready = {vid: False for vid in video_ids}
         deadline = time.time() + timeout_s
-
         while time.time() < deadline:
             all_done = True
             for vid in video_ids:
-                if ready[vid]:
-                    continue
+                if ready[vid]: continue
                 try:
                     info = AdVideo(vid).api_get(fields=["thumbnails", "picture"])
-                    has_pic = bool(info.get("picture"))
-                    has_thumbs = bool(info.get("thumbnails"))
-                    if has_pic or has_thumbs:
-                        ready[vid] = True
-                    else:
-                        all_done = False
-                except Exception:
-                    all_done = False
-            if all_done:
-                break
+                    if info.get("picture") or info.get("thumbnails"): ready[vid] = True
+                    else: all_done = False
+                except Exception: all_done = False
+            if all_done: break
             time.sleep(sleep_s)
         return ready
 
     def resolve_instagram_actor_id(page_id: str) -> str | None:
         try:
             p = Page(page_id).api_get(fields=["instagram_business_account"])
-            iba = p.get("instagram_business_account") or {}
-            return iba.get("id")
-        except Exception:
-            return None
+            return (p.get("instagram_business_account") or {}).get("id")
+        except Exception: return None
 
-    # Stage 1: persist to temp (parallel)
+    # Execution
     persisted, persist_errors = [], []
-    from concurrent.futures import ThreadPoolExecutor
-
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(_persist_to_tmp, u): _fname_any(u) for u in videos}
         for fut, nm in futs.items():
-            try:
-                persisted.append(fut.result())
-            except Exception as e:
-                persist_errors.append(f"{nm}: {e}")
+            try: persisted.append(fut.result())
+            except Exception as e: persist_errors.append(f"{nm}: {e}")
 
-    if persist_errors:
-        st.warning("Some files failed to prepare:\n- " + "\n- ".join(persist_errors))
+    if persist_errors: st.warning("Some files failed to prepare.")
 
     ig_actor_id = None
-    try:
-        ig_actor_id = st.session_state.get("ig_actor_id_from_page") or None
-    except Exception:
-        pass
-    if try_instagram and not ig_actor_id:
-        ig_actor_id = resolve_instagram_actor_id(page_id)
+    try: ig_actor_id = st.session_state.get("ig_actor_id_from_page") or None
+    except Exception: pass
+    if try_instagram and not ig_actor_id: ig_actor_id = resolve_instagram_actor_id(page_id)
 
     uploads, api_errors = [], []
     total = len(persisted)
     progress = st.progress(0, text=f"Uploading 0/{total} videos…") if total else None
 
     def _upload_one(item):
-        name, path = item["name"], item["path"]
-        vid = upload_video_resumable(path)
-        return {"name": name, "path": path, "video_id": vid}
+        vid = upload_video_resumable(item["path"])
+        return {"name": item["name"], "path": item["path"], "video_id": vid}
 
     done = 0
     if total:
@@ -561,85 +408,49 @@ def upload_videos_create_ads(
             future_to_item = {ex.submit(_upload_one, item): item for item in persisted}
             for fut in as_completed(future_to_item):
                 item = future_to_item[fut]
-                name = item["name"]
                 try:
                     res = fut.result()
                     res["ready"] = False
                     uploads.append(res)
                     done += 1
-                    if progress is not None:
-                        pct = int(done / total * 100)
-                        progress.progress(pct, text=f"Uploading {done}/{total} videos…")
+                    if progress: progress.progress(int(done / total * 100), text=f"Uploading {done}/{total} videos…")
                 except Exception as e:
-                    api_errors.append(f"{name}: upload failed: {e}")
+                    api_errors.append(f"{item['name']}: upload failed: {e}")
 
-    if progress:
-        progress.empty()
-
-    # Wait for all videos to have thumbnails
+    if progress: progress.empty()
     video_ids = [u["video_id"] for u in uploads]
     _ = wait_all_videos_ready(video_ids, timeout_s=300, sleep_s=5)
 
-    # Create creatives + ads in parallel
     results = []
     total_c = len(uploads)
     progress_c = st.progress(0, text=f"Creating 0/{total_c} ads…") if total_c else None
     done_c = 0
 
     def _process_one_video(up):
-        from facebook_business.adobjects.advideo import AdVideo
-        from facebook_business.adobjects.adcreative import AdCreative
-        from facebook_business.adobjects.ad import Ad
-        from facebook_business.exceptions import FacebookRequestError
-        import time
-
         name, video_id = up["name"], up["video_id"]
         try:
             video_info = AdVideo(video_id).api_get(fields=["picture"])
             thumbnail_url = video_info.get("picture")
-            if not thumbnail_url:
-                raise RuntimeError("Video processed but no 'picture' (thumbnail) URL was returned.")
-
+            
             def _create_once(allow_ig: bool) -> str:
-                vd = {
-                    "video_id": video_id,
-                    "title": name,
-                    "message": "",
-                    "image_url": thumbnail_url,
-                }
-                if store_url:
-                    vd["call_to_action"] = {
-                        "type": "INSTALL_MOBILE_APP",
-                        "value": {"link": store_url},
-                    }
+                vd = {"video_id": video_id, "title": name, "message": "", "image_url": thumbnail_url}
+                if store_url: vd["call_to_action"] = {"type": "INSTALL_MOBILE_APP", "value": {"link": store_url}}
                 spec = {"page_id": page_id, "video_data": vd}
-                if allow_ig and ig_actor_id:
-                    spec["instagram_actor_id"] = ig_actor_id
-
-                creative = account.create_ad_creative(
-                    fields=[],
-                    params={"name": name, "object_story_spec": spec},
-                )
-                ad = account.create_ad(
-                    fields=[],
-                    params={
-                        "name": make_ad_name(name, ad_name_prefix),
-                        "adset_id": adset_id,
-                        "creative": {"creative_id": creative["id"]},
-                        "status": Ad.Status.active,
-                    },
-                )
+                if allow_ig and ig_actor_id: spec["instagram_actor_id"] = ig_actor_id
+                
+                creative = account.create_ad_creative(fields=[], params={"name": name, "object_story_spec": spec})
+                ad = account.create_ad(fields=[], params={
+                    "name": make_ad_name(name, ad_name_prefix),
+                    "adset_id": adset_id,
+                    "creative": {"creative_id": creative["id"]},
+                    "status": Ad.Status.active,
+                })
                 return ad["id"]
 
-            try:
-                ad_id = _create_once(True)
-            except FacebookRequestError as e:
-                msg = (e.api_error_message() or "").lower()
-                if "instagram" in msg or "not ready" in msg or "processing" in msg:
-                    time.sleep(5)
-                    ad_id = _create_once(False)
-                else:
-                    raise
+            try: ad_id = _create_once(True)
+            except FacebookRequestError: 
+                time.sleep(5)
+                ad_id = _create_once(False)
 
             return {"success": True, "result": {"name": name, "ad_id": ad_id}}
         except Exception as e:
@@ -651,26 +462,13 @@ def upload_videos_create_ads(
             for fut in as_completed(future_to_video):
                 res = fut.result()
                 done_c += 1
-                if progress_c:
-                    pct = int(done_c / total_c * 100)
-                    progress_c.progress(pct, text=f"Creating {done_c}/{total_c} ads…")
-                if res["success"]:
-                    results.append(res["result"])
-                else:
-                    api_errors.append(res["error"])
+                if progress_c: progress_c.progress(int(done_c / total_c * 100), text=f"Creating {done_c}/{total_c} ads…")
+                if res["success"]: results.append(res["result"])
+                else: api_errors.append(res["error"])
 
-    if progress_c:
-        progress_c.empty()
-
-    if api_errors:
-        st.error(
-            f"{len(api_errors)} video(s) failed during creation:\n"
-            + "\n".join(f"- {e}" for e in api_errors[:20])
-            + ("\n..." if len(api_errors) > 20 else "")
-        )
-
+    if progress_c: progress_c.empty()
+    if api_errors: st.error(f"{len(api_errors)} errors:\n" + "\n".join(api_errors[:20]))
     return results
-
 # --------------------------------------------------------------------
 # Ad set planning + creation
 # --------------------------------------------------------------------
@@ -683,43 +481,26 @@ def _plan_upload(
     uploaded_files: list,
     settings: dict,
 ) -> dict:
-    """
-    Compute planned ad set name/budget/schedule/ad names from settings
-    and available videos (local + remote_videos).
-    """
     start_iso = settings.get("start_iso") or next_sat_0900_kst()
     end_iso = settings.get("end_iso")
-
     n = int(settings.get("suffix_number") or 1)
     suffix_str = f"{n}th"
-
     launch_date_suffix = ""
     if settings.get("add_launch_date"):
         try:
             dt = datetime.fromisoformat(start_iso)
             launch_date_suffix = "_" + dt.strftime("%y%m%d")
-        except Exception:
-            launch_date_suffix = ""
+        except Exception: launch_date_suffix = ""
 
     adset_name = f"{adset_prefix}_{suffix_str}{launch_date_suffix}"
-
     allowed = {".mp4", ".mpeg4"}
     remote = st.session_state.remote_videos.get(settings.get("game_key", ""), []) or []
-
-    def _name(u):
-        return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
-
-    def _is_video(u):
-        return pathlib.Path(_name(u)).suffix.lower() in allowed
-
+    def _name(u): return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
+    def _is_video(u): return pathlib.Path(_name(u)).suffix.lower() in allowed
     vids_local = [u for u in (uploaded_files or []) if _is_video(u)]
     vids_all = _dedupe_by_name(vids_local + [rv for rv in remote if _is_video(rv)])
-
     budget_usd_per_day = compute_budget_from_settings(vids_all, settings)
-
-    ad_name_prefix = (
-        settings.get("ad_name_prefix") if settings.get("ad_name_mode") == "Prefix + filename" else None
-    )
+    ad_name_prefix = (settings.get("ad_name_prefix") if settings.get("ad_name_mode") == "Prefix + filename" else None)
     ad_names = [make_ad_name(_name(u), ad_name_prefix) for u in vids_all]
 
     return {
@@ -750,39 +531,27 @@ def create_creativetest_adset(
     promoted_object: dict | None = None,
     end_iso: str | None = None,
 ) -> str:
-    """
-    Create an ACTIVE ad set for a creative test and return its ID.
-    """
     from facebook_business.adobjects.adset import AdSet
-
     params = {
         "name": adset_name,
         "campaign_id": campaign_id,
         "daily_budget": dollars_to_minor(daily_budget_usd),
         "billing_event": AdSet.BillingEvent.impressions,
-        "optimization_goal": getattr(
-            AdSet.OptimizationGoal,
-            optimization_goal.lower(),
-            AdSet.OptimizationGoal.app_installs,
-        ),
+        "optimization_goal": getattr(AdSet.OptimizationGoal, optimization_goal.lower(), AdSet.OptimizationGoal.app_installs),
         "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
         "targeting": targeting,
         "status": AdSet.Status.active,
         "start_time": start_iso,
     }
-
-    if end_iso:
-        params["end_time"] = end_iso
-    if promoted_object:
-        params["promoted_object"] = promoted_object
-
+    if end_iso: params["end_time"] = end_iso
+    if promoted_object: params["promoted_object"] = promoted_object
     adset = account.create_ad_set(fields=[], params=params)
     return adset["id"]
 
 # --------------------------------------------------------------------
-# Per-game mapping + main entry
+# Config Lookup (Combined Hardcoded + Dynamic)
 # --------------------------------------------------------------------
-FB_GAME_MAPPING: Dict[str, Dict[str, Any]] = {
+FB_GAME_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "XP HERO": {
         "account_id": "act_692755193188182",
         "campaign_id": "120218934861590118",
@@ -855,6 +624,22 @@ FB_GAME_MAPPING: Dict[str, Dict[str, Any]] = {
     },
 }
 
+def get_fb_config(game_name: str) -> dict:
+    """Helper to find config in Defaults OR Custom Manager."""
+    # 1. Try Defaults
+    if game_name in FB_GAME_DEFAULTS:
+        return FB_GAME_DEFAULTS[game_name]
+    
+    # 2. Try Custom Manager
+    try:
+        custom_conf = game_manager.get_game_config(game_name, "facebook")
+        if custom_conf:
+            return custom_conf
+    except Exception:
+        pass 
+        
+    raise ValueError(f"No Facebook configuration found for game: {game_name}")
+
 def upload_to_facebook(
     game_name: str,
     uploaded_files: list,
@@ -864,21 +649,22 @@ def upload_to_facebook(
 ) -> dict:
     """
     Main entry: create ad set + ads for a game using current settings.
-    If simulate=True, just return the plan (no writes).
     """
-    if game_name not in FB_GAME_MAPPING:
-        raise ValueError(f"No FB mapping configured for game: {game_name}")
-
-    cfg = FB_GAME_MAPPING[game_name]
+    cfg = get_fb_config(game_name)
     account = init_fb_from_secrets(cfg["account_id"])
 
-    page_id_key = cfg.get("page_id_key")
-    if not page_id_key or page_id_key not in st.secrets:
-        raise RuntimeError(f"Missing {page_id_key!r} in st.secrets for game {game_name}")
-    page_id = st.secrets[page_id_key]
+    # Handle Page ID (Secret Key vs Raw ID)
+    page_id = cfg.get("page_id")
+    if not page_id:
+        page_key = cfg.get("page_id_key")
+        if page_key and page_key in st.secrets:
+            page_id = st.secrets[page_key]
+            
+    if not page_id:
+        raise RuntimeError(f"Missing Page ID for {game_name}")
 
     # Validate page and capture IG actor
-    page_check = validate_page_binding(account, page_id)
+    page_check = validate_page_binding(account, page_id) # << FIXED HERE
     ig_actor_id_from_page = page_check.get("instagram_business_account_id")
 
     # Extra safety: ensure page_id != ad account id

@@ -35,6 +35,7 @@ import unity_ads as uni_ops
 import fb as fb_marketer
 import uni as uni_marketer
 
+import game_manager
 # ----- UI/Validation helpers --------------------------------------------------
 try:
     MAX_UPLOAD_MB = int(st.get_option("server.maxUploadSize"))
@@ -181,16 +182,80 @@ with st.sidebar:
 # ======================================================================
 # 공통 메인 앱 렌더러 (운영 / 마케터 공용) – 모듈만 다르게 주입
 # ======================================================================
+
 def render_main_app(title: str, fb_module, unity_module, is_marketer: bool = False) -> None:
     """Render the full Creative 자동 업로드 UI with the given page title and helper modules."""
     st.title(title)
     st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.")
 
-    NUM_GAMES = 10
-    GAMES = game_tabs(NUM_GAMES)
-    accepted_types = ["mp4", "mpeg4"]
+    # --- MARKETER ONLY: Add New Game Sidebar ---
+    if is_marketer:
+        with st.sidebar:
+            st.divider() # Visual separation
+            with st.expander("➕ Add New Game", expanded=False):
+                with st.form("add_game_form"):
+                    st.caption("Add a new game configuration locally.")
+                    new_game_name = st.text_input("Game Name (e.g. My New RPG)")
+                    
+                    st.markdown("**Facebook Details**")
+                    new_fb_act = st.text_input("Ad Account ID", placeholder="act_12345678")
+                    new_fb_page = st.text_input("Page ID", placeholder="1234567890")
+                    
+                    st.markdown("**Unity Details**")
+                    new_unity_id = st.text_input("Unity Game ID (Optional)")
+                    
+                    submitted = st.form_submit_button("Save Game")
+                    
+                    if submitted:
+                        if not new_game_name or not new_fb_act or not new_fb_page:
+                            st.error("Name, Ad Account, and Page ID are required.")
+                        else:
+                            # --- VALIDATION STEP ---
+                            status_box = st.status("Validating IDs with Meta...", expanded=True)
+                            try:
+                                # 1. Auth
+                                fb_ops.init_fb_from_secrets()
+                                from facebook_business.adobjects.adaccount import AdAccount
+                                from facebook_business.adobjects.page import Page
+                                
+                                # 2. Validate Ad Account
+                                status_box.write("Checking Ad Account...")
+                                act = AdAccount(new_fb_act.strip())
+                                act_info = act.api_get(fields=["name", "account_status"])
+                                status_box.write(f"✅ Found Account: {act_info.get('name')}")
+
+                                # 3. Validate Page
+                                status_box.write("Checking Page Access...")
+                                pg = Page(new_fb_page.strip())
+                                pg_info = pg.api_get(fields=["name", "is_published"])
+                                status_box.write(f"✅ Found Page: {pg_info.get('name')}")
+                                
+                                # 4. Success -> Save
+                                status_box.update(label="Validation Successful!", state="complete")
+                                
+                                game_manager.save_new_game(
+                                    new_game_name, new_fb_act, new_fb_page, new_unity_id
+                                )
+                                st.success(f"Saved **{new_game_name}** successfully!")
+                                import time
+                                time.sleep(1.5)
+                                st.rerun()
+
+                            except Exception as e:
+                                status_box.update(label="Validation Failed", state="error")
+                                st.error(f"❌ Invalid ID or Permission Error:\n{e}")
+                                # Do NOT save if error occurs
+
+    # Load Games: Marketers see ALL, Operations see DEFAULT only
+    GAMES = game_manager.get_all_game_names(include_custom=is_marketer)
+    
+    # Render Tabs
+    if not GAMES:
+        st.error("No games found.")
+        return
 
     _tabs = st.tabs(GAMES)
+    
 
     for i, game in enumerate(GAMES):
         with _tabs[i]:
