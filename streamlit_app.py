@@ -181,7 +181,7 @@ with st.sidebar:
 # ======================================================================
 # 공통 메인 앱 렌더러 (운영 / 마케터 공용) – 모듈만 다르게 주입
 # ======================================================================
-def render_main_app(title: str, fb_module, unity_module) -> None:
+def render_main_app(title: str, fb_module, unity_module, is_marketer: bool = False) -> None:
     """Render the full Creative 자동 업로드 UI with the given page title and helper modules."""
     st.title(title)
     st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.")
@@ -316,7 +316,11 @@ def render_main_app(title: str, fb_module, unity_module) -> None:
                     # --- 플랫폼별 버튼들 ---
                     if platform == "Facebook":
                         ok_msg_placeholder = st.empty()
-                        cont = st.button("Creative Test 업로드하기", key=f"continue_{i}")
+                        
+                        # Change label based on mode
+                        btn_label = "Creative 업로드하기" if is_marketer else "Creative Test 업로드하기"
+                        
+                        cont = st.button(btn_label, key=f"continue_{i}")
                         clr = st.button("전체 초기화", key=f"clear_{i}")
                     else:
                         unity_ok_placeholder = st.empty()
@@ -535,7 +539,7 @@ def render_main_app(title: str, fb_module, unity_module) -> None:
 # ======================================================================
 if page == "Creative 자동 업로드":
     # 운영: facebook_ads / unity_ads 사용
-    render_main_app("🎮 Creative 자동 업로드", fb_ops, uni_ops)
+    render_main_app("🎮 Creative 자동 업로드", fb_ops, uni_ops, is_marketer=False)
 else:  # "Creative 자동 업로드 - 마케터"
-    # 마케터: fb.py / uni.py 사용 (여기서 fb/uni에 기능 추가하면서 실험 가능)
-    render_main_app("🎮 Creative 자동 업로드 - 마케터", fb_marketer, uni_marketer)
+    # 마케터: fb.py / uni.py 사용
+    render_main_app("🎮 Creative 자동 업로드 - 마케터", fb_marketer, uni_marketer, is_marketer=True)

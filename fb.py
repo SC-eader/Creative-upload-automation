@@ -284,7 +284,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         "os_choice": "Android only",
         "ad_name_mode": "Use video filename",
         "add_launch_date": False,
-        "creative_type": "단일 이미지/영상",
+        "creative_type": "단일 영상",
     }
     for k, v in hidden_defaults.items():
         if k not in cur: cur[k] = v
@@ -351,8 +351,8 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         if selected_adset_id:
             creative_type = st.selectbox(
                 "Creative Type",
-                ["단일 이미지/영상", "다이나믹"],
-                index=0 if cur.get("creative_type") == "단일 이미지/영상" else 1,
+                ["단일 영상", "다이나믹"],
+                index=0 if cur.get("creative_type") == "단일 영상" else 1,
                 key=f"mk_ctype_{idx}",
                 help="단일: 각 영상을 개별 광고로 생성 / 다이나믹: 여러 소재를 하나의 Dynamic Creative로 묶음"
             )
@@ -379,7 +379,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         st.session_state.settings[game] = cur
 
         if selected_camp_id and selected_adset_id:
-            c_type_str = cur.get("creative_type", "단일 이미지/영상")
+            c_type_str = cur.get("creative_type", "단일 영상")
             st.success(f"Target: `{selected_adset_id}`\nType: **{c_type_str}**")
         elif selected_camp_id:
              st.info("광고 세트를 선택해주세요.")
@@ -993,7 +993,7 @@ def upload_to_facebook(
 
     target_campaign_id = settings.get("campaign_id")
     target_adset_id = settings.get("adset_id")
-    creative_type = settings.get("creative_type", "단일 이미지/영상")
+    creative_type = settings.get("creative_type", "단일 영상")
 
     if not target_campaign_id: raise RuntimeError("캠페인이 선택되지 않았습니다.")
     if not target_adset_id: raise RuntimeError("광고 세트가 선택되지 않았습니다.")
@@ -1009,7 +1009,7 @@ def upload_to_facebook(
     if simulate: return plan
 
     # 4. Cleanup Logic
-    if creative_type == "단일 이미지/영상":
+    if creative_type == "단일 영상":
         try:
             cleanup_low_performing_ads(
                 account=account, 
