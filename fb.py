@@ -193,7 +193,7 @@ def cleanup_low_performing_ads(account, adset_id: str, new_files_count: int) -> 
 # 3. Template Fetcher
 # -------------------------------------------------------------------------
 def fetch_reference_creative_data(account, adset_id: str) -> dict:
-    """Finds the most recent active ad and extracts its text/headline/CTA."""
+    """Finds the most recent active ad and extracts its text/headline/CTA/Link."""
     try:
         ads = account.get_ads(
             params={
@@ -212,24 +212,46 @@ def fetch_reference_creative_data(account, adset_id: str) -> dict:
         if not creative_id: return {}
 
         creative = AdCreative(creative_id).api_get(fields=["object_story_spec", "asset_feed_spec"])
-        data = {"message": None, "headline": None, "call_to_action": None}
+        # Added 'link' key
+        data = {"message": None, "headline": None, "call_to_action": None, "link": None}
 
-        # Single Video Spec
+        # 1. Standard Spec
         spec = creative.get("object_story_spec")
         if spec:
+            # Try video data first
             video_data = spec.get("video_data")
             if video_data:
                 data["message"] = video_data.get("message")
                 data["headline"] = video_data.get("title")
                 data["call_to_action"] = video_data.get("call_to_action")
+                # Extract Link from CTA
+                if video_data.get("call_to_action"):
+                    data["link"] = video_data["call_to_action"].get("value", {}).get("link")
+                return data
+            
+            # Try link data (image ads)
+            link_data = spec.get("link_data")
+            if link_data:
+                data["message"] = link_data.get("message")
+                data["headline"] = link_data.get("name") # Headline is usually 'name' or 'title' in link_data
+                data["call_to_action"] = link_data.get("call_to_action")
+                data["link"] = link_data.get("link")
                 return data
 
-        # Dynamic Spec
+        # 2. Dynamic Spec (Asset Feed)
         feed = creative.get("asset_feed_spec")
         if feed:
             if feed.get("bodies"): data["message"] = feed["bodies"][0].get("text")
             if feed.get("titles"): data["headline"] = feed["titles"][0].get("text")
-            if feed.get("call_to_action_types"): data["call_to_action"] = {"type": feed["call_to_action_types"][0]}
+            # Extract Link
+            if feed.get("link_urls"): data["link"] = feed["link_urls"][0].get("website_url")
+            
+            # Extract CTA
+            ctas = feed.get("call_to_action_types")
+            if ctas: 
+                # Convert list string to dict structure for consistency if needed, 
+                # but Flexible format needs the LIST. We'll handle format conversion in the builder.
+                data["call_to_action"] = {"type": ctas[0]} 
             
         return data
     except Exception as e:
@@ -334,11 +356,20 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             if creative_type == "다이나믹":
                 dco_aspect = st.selectbox(
                     "소재 비율 (Aspect Ratio)",
-                    ["세로 (9:16)", "가로 (16:9)", "정방향 (1:1)"],
+                    ["세로 (9:16)", "가로 (16:9)", "정방향 (1:1)", "혼합 (세로+가로+정방향)"], # << Added Mixed
                     index=0, 
                     key=f"mk_dco_ratio_{idx}"
                 )
                 cur["dco_aspect_ratio"] = dco_aspect
+                
+                # NEW: Custom Creative Name Input
+                dco_name = st.text_input(
+                    "Creative Name (Optional)",
+                    placeholder="Enter custom name for this flexible creative",
+                    key=f"mk_dco_name_{idx}",
+                    help="비워두면 자동 생성된 이름(Flexible_xvids_...)을 사용합니다."
+                )
+                cur["dco_creative_name"] = dco_name.strip()
 
         st.session_state.settings[game] = cur
 
@@ -361,10 +392,14 @@ def upload_videos_create_ads_cloned(
     store_url: str | None = None,
     try_instagram: bool = True,
     template_data: dict | None = None,
+    use_flexible_format: bool = False,
+    target_aspect_ratio: str | None = None,
+    creative_name_manual: str | None = None,
 ):
     """
     Modified version of upload_videos_create_ads.
-    Applies 'template_data' (message, headline, CTA) to the new ads.
+    - Standard: Creates 1 Ad per Video.
+    - Flexible: Creates 1 Ad containing ALL videos (Asset Feed).
     """
     allowed = {".mp4", ".mpeg4"}
     def _is_video(u):
@@ -372,7 +407,104 @@ def upload_videos_create_ads_cloned(
         return pathlib.Path(n).suffix.lower() in allowed
 
     videos = fb_ops._dedupe_by_name([u for u in (uploaded_files or []) if _is_video(u)])
-    
+    if use_flexible_format and target_aspect_ratio:
+        # Define rules: (Width, Height) or Ratio
+        # "세로 (9:16)", "가로 (16:9)", "정방향 (1:1)"
+        
+        # We need to detect resolution. 
+        # Since 'uploaded_files' are Streamlit objects, we can't easily get resolution 
+        # without a library like 'ffmpeg' or 'moviepy'.
+        #
+        # PLAN B: Check Filename Patterns (Most practical/fastest)
+        # OR 
+        # PLAN C: Since we persist to temp disk anyway, we *could* probe, but that requires extra libs.
+        # 
+        # Let's rely on FILENAME conventions if available (e.g., 1080x1920), 
+        # OR rely on Meta's API to validate after upload (slower but accurate).
+        #
+        # However, the user asked to "Throw an error" implying BEFORE creation.
+        #
+        # Let's try a robust filename check first as it's instant.
+        # If your filenames don't have resolution, we might need to assume the user knows what they are doing
+        # or use a lightweight probe if 'moviepy' is installed.
+        # 
+        # Assuming filenames have cues OR we blindly trust user? 
+        # actually, the prompt says "if all videos does not match... give error".
+        # 
+        # Let's add a "Metadata Check" step:
+        # We will parse the filename for "1080x1920", "1920x1080", "1080x1080".
+        
+        ratio_name = target_aspect_ratio
+        mismatches = []
+        
+        # --- NEW: Mixed Mode Validation ---
+        if "혼합" in target_aspect_ratio:
+            # Rule: Should have approx 3 videos (Vertical, Horizontal, Square)
+            # We will validate that we have at least coverage for these types.
+            
+            has_vertical = False
+            has_horizontal = False
+            has_square = False
+            
+            for u in videos:
+                name = fb_ops._fname_any(u).lower()
+                if "1080x1920" in name or "9x16" in name or "portrait" in name or "세로" in name:
+                    has_vertical = True
+                elif "1920x1080" in name or "16x9" in name or "landscape" in name or "가로" in name:
+                    has_horizontal = True
+                elif "1080x1080" in name or "1x1" in name or "square" in name or "정방향" in name:
+                    has_square = True
+            
+            # Check for missing pieces
+            missing_types = []
+            if not has_vertical: missing_types.append("Vertical (9:16)")
+            if not has_horizontal: missing_types.append("Horizontal (16:9)")
+            if not has_square: missing_types.append("Square (1:1)")
+            
+            if missing_types:
+                st.error(
+                    f"🚨 Mixed Ratio Incomplete!\n"
+                    f"You selected **Mixed (All Ratios)** but missed the following formats:\n"
+                    + "\n".join([f"- {m}" for m in missing_types])
+                    + "\n\nPlease ensure you upload 3 videos: one of each ratio."
+                )
+                return []
+                
+        # --- Existing Single-Ratio Validation ---
+        else:
+            # (Keep your existing logic for single ratios)
+            if "세로" in target_aspect_ratio:
+                ratio_name = "Vertical (9:16)"
+            elif "가로" in target_aspect_ratio:
+                ratio_name = "Horizontal (16:9)"
+            elif "정방향" in target_aspect_ratio:
+                ratio_name = "Square (1:1)"
+
+            for u in videos:
+                name = fb_ops._fname_any(u).lower()
+                is_valid = True
+                
+                if "세로" in target_aspect_ratio:
+                    if "1920x1080" in name or "16x9" in name or "landscape" in name: is_valid = False
+                    elif "1080x1080" in name or "1x1" in name or "square" in name: is_valid = False
+                elif "가로" in target_aspect_ratio:
+                    if "1080x1920" in name or "9x16" in name or "portrait" in name: is_valid = False
+                    elif "1080x1080" in name or "1x1" in name or "square" in name: is_valid = False
+                elif "정방향" in target_aspect_ratio:
+                    if "1080x1920" in name or "9x16" in name or "portrait" in name: is_valid = False
+                    elif "1920x1080" in name or "16x9" in name or "landscape" in name: is_valid = False
+
+                if not is_valid:
+                    mismatches.append(name)
+
+            if mismatches:
+                st.error(
+                    f"🚨 Aspect Ratio Mismatch Detected!\n"
+                    f"Target Mode: **{ratio_name}**\n"
+                    f"The following files seem incorrect based on their filename:\n"
+                    + "\n".join([f"- {m}" for m in mismatches])
+                )
+                return []
     # 1. Persist to temp
     persisted = []
     with ThreadPoolExecutor(max_workers=4) as ex:
@@ -395,7 +527,6 @@ def upload_videos_create_ads_cloned(
     
     for i, item in enumerate(persisted):
         try:
-            # Simple upload for simplicity. Ideally copy resumable logic if needed.
             v = account.create_ad_video(params={
                 "file": item["path"], 
                 "content_category": "VIDEO_GAMING"
@@ -408,7 +539,7 @@ def upload_videos_create_ads_cloned(
     progress.empty()
     time.sleep(5) # Wait for thumbnails
 
-    # 3. Create Ads with Cloned Settings
+    # 3. Create Ads (Branching Logic)
     results = []
     api_errors = []
     
@@ -421,59 +552,141 @@ def upload_videos_create_ads_cloned(
 
     template = template_data or {}
     
-    def _create_ad_process(up):
-        name = up["name"]
-        vid = up["video_id"]
+    # Common copied settings
+    headline = template.get("headline") or "New Game"
+    message = template.get("message") or ""
+    
+    # CTA Logic
+    orig_cta = template.get("call_to_action")
+    target_link = store_url or template.get("link")
+    
+    # -------------------------------------------------------------------------
+    # BRANCH A: FLEXIBLE FORMAT (Dynamic) - 1 Ad, Multiple Videos
+    # -------------------------------------------------------------------------
+    if use_flexible_format:
+        if not uploads: return []
+        
+        st.info(f"Creating 1 Flexible Ad with {len(uploads)} videos...")
         
         try:
-            from facebook_business.adobjects.advideo import AdVideo
-            vinfo = AdVideo(vid).api_get(fields=["picture"])
-            thumb = vinfo.get("picture")
+            # Prepare Asset Feed Spec
+            video_assets = [{"video_id": u["video_id"]} for u in uploads]
             
-            # Use template or fallback
-            headline = template.get("headline") or name
-            message = template.get("message") or ""
-            cta = template.get("call_to_action")
+            # CTA Type (List of strings)
+            cta_type = "INSTALL_MOBILE_APP"
+            if orig_cta and isinstance(orig_cta, dict):
+                cta_type = orig_cta.get("type", "INSTALL_MOBILE_APP")
             
-            if cta and store_url and "value" in cta:
-                 cta["value"]["link"] = store_url
-            elif not cta and store_url:
-                 cta = {"type": "INSTALL_MOBILE_APP", "value": {"link": store_url}}
+            # Prepare Link
+            if not target_link:
+                # Fallback to a placeholder if absolutely nothing found, to prevent crash? 
+                # Better to error out so user fixes it.
+                raise RuntimeError("Flexible ads require a Store URL or Website URL (none found in settings or template).")
 
-            video_data = {
-                "video_id": vid,
-                "image_url": thumb,
-                "title": headline,    
-                "message": message,   
-                "call_to_action": cta 
+            asset_feed_spec = {
+                "videos": video_assets,
+                "bodies": [{"text": message}] if message else [],
+                "titles": [{"text": headline}] if headline else [],
+                "call_to_action_types": [cta_type],
+                "link_urls": [{"website_url": target_link}],
+                "ad_formats": ["AUTOMATIC_FORMAT"],
             }
             
-            spec = {"page_id": page_id, "video_data": video_data}
+            # Basic Page Spec
+            object_story_spec = {
+                "page_id": page_id,
+            }
             if try_instagram and ig_actor_id:
-                spec["instagram_actor_id"] = ig_actor_id
-                
+                object_story_spec["instagram_actor_id"] = ig_actor_id
+
+            # Create ONE Creative
+            # Create ONE Creative
+            # Use manual name if provided, else auto-generate
+            if creative_name_manual:
+                creative_name = creative_name_manual
+            else:
+                base_name = uploads[0]["name"]
+                creative_name = f"Flexible_{len(uploads)}vids_{base_name}"
+            
+            # FIX: asset_feed_spec is a SIBLING of object_story_spec
             creative = account.create_ad_creative(params={
-                "name": name,
-                "object_story_spec": spec
+                "name": creative_name,
+                "object_story_spec": object_story_spec,
+                "asset_feed_spec": asset_feed_spec
             })
             
-            ad_name = make_ad_name(name, ad_name_prefix)
+            # Create ONE Ad
+            ad_name = make_ad_name(f"Flexible_{len(uploads)}Items", ad_name_prefix)
             account.create_ad(params={
                 "name": ad_name,
                 "adset_id": adset_id,
                 "creative": {"creative_id": creative["id"]},
                 "status": "ACTIVE"
             })
-            return True, name
-        except Exception as e:
-            return False, f"{name}: {e}"
+            
+            results.append(ad_name)
+            st.success(f"✅ Created Flexible Ad: {ad_name}")
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = [ex.submit(_create_ad_process, u) for u in uploads]
-        for f in as_completed(futs):
-            ok, res = f.result()
-            if ok: results.append(res)
-            else: api_errors.append(res)
+        except Exception as e:
+            st.error(f"Flexible Ad Creation Failed: {e}")
+            api_errors.append(str(e))
+
+    # -------------------------------------------------------------------------
+    # BRANCH B: SINGLE FORMAT (Standard) - 1 Ad per Video
+    # -------------------------------------------------------------------------
+    else:
+        def _create_ad_process(up):
+            name = up["name"]
+            vid = up["video_id"]
+            
+            try:
+                from facebook_business.adobjects.advideo import AdVideo
+                vinfo = AdVideo(vid).api_get(fields=["picture"])
+                thumb = vinfo.get("picture")
+                
+                # Fix CTA for Single Spec
+                final_cta = None
+                if orig_cta:
+                     final_cta = orig_cta.copy()
+                     if target_link and "value" in final_cta:
+                         final_cta["value"]["link"] = target_link
+                elif target_link:
+                     final_cta = {"type": "INSTALL_MOBILE_APP", "value": {"link": target_link}}
+
+                video_data = {
+                    "video_id": vid,
+                    "image_url": thumb,
+                    "title": headline,    
+                    "message": message,   
+                    "call_to_action": final_cta 
+                }
+                
+                spec = {"page_id": page_id, "video_data": video_data}
+                if try_instagram and ig_actor_id:
+                    spec["instagram_actor_id"] = ig_actor_id
+                    
+                creative = account.create_ad_creative(params={
+                    "name": name,
+                    "object_story_spec": spec
+                })
+                
+                ad_name = make_ad_name(name, ad_name_prefix)
+                account.create_ad(params={
+                    "name": ad_name,
+                    "adset_id": adset_id,
+                    "creative": {"creative_id": creative["id"]},
+                    "status": "ACTIVE"
+                })
+                return True, name
+            except Exception as e:
+                return False, f"{name}: {e}"
+
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            futs = [ex.submit(_create_ad_process, u) for u in uploads]
+            for f in as_completed(futs):
+                ok, res = f.result()
+                if ok: results.append(res)
+                else: api_errors.append(res)
 
     if api_errors:
         st.error("Some ads failed to create:\n" + "\n".join(api_errors))
@@ -545,27 +758,21 @@ def upload_to_facebook(
     store_url = (settings.get("store_url") or "").strip()
 
     # 6. Upload
-    if creative_type == "단일 이미지/영상":
-        upload_videos_create_ads_cloned(
-            account=account,
-            page_id=str(page_id),
-            adset_id=target_adset_id,
-            uploaded_files=uploaded_files,
-            ad_name_prefix=ad_name_prefix,
-            store_url=store_url,
-            template_data=template_data
-        )
-    
-    elif creative_type == "다이나믹":
-        st.warning("⚠️ '다이나믹' 모드 구현 중... 현재는 단일 이미지 로직(설정 복사 포함)으로 실행됩니다.")
-        upload_videos_create_ads_cloned(
-            account=account,
-            page_id=str(page_id),
-            adset_id=target_adset_id,
-            uploaded_files=uploaded_files,
-            ad_name_prefix=ad_name_prefix,
-            store_url=store_url,
-            template_data=template_data
-        )
 
-    return plan
+    # Determine mode flag
+    is_flexible = (creative_type == "다이나믹")
+    target_ratio_val = settings.get("dco_aspect_ratio") if is_flexible else None
+    manual_creative_name = settings.get("dco_creative_name") if is_flexible else None
+
+    upload_videos_create_ads_cloned(
+        account=account,
+        page_id=str(page_id),
+        adset_id=target_adset_id,
+        uploaded_files=uploaded_files,
+        ad_name_prefix=ad_name_prefix,
+        store_url=store_url,
+        template_data=template_data,
+        use_flexible_format=is_flexible,
+        target_aspect_ratio=target_ratio_val,
+        creative_name_manual=manual_creative_name # << Pass it here
+    )
