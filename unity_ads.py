@@ -271,6 +271,25 @@ def _unity_unassign_creative_pack(*, org_id: str, title_id: str, campaign_id: st
     path = f"organizations/{org_id}/apps/{title_id}/campaigns/{campaign_id}/assigned-creative-packs/{assigned_creative_pack_id}"
     _unity_delete(path)
 
+def _unity_unassign_with_retry(*, org_id: str, title_id: str, campaign_id: str, assigned_creative_pack_id: str, max_retries: int = 3) -> None:
+    """Unassign with exponential backoff on rate limit."""
+    for attempt in range(max_retries):
+        try:
+            _unity_unassign_creative_pack(
+                org_id=org_id,
+                title_id=title_id,
+                campaign_id=campaign_id,
+                assigned_creative_pack_id=assigned_creative_pack_id
+            )
+            return  # Success
+        except RuntimeError as e:
+            if "429" in str(e) and attempt < max_retries - 1:
+                wait_time = 2 ** (attempt + 1)  # 2, 4, 8 seconds
+                logger.warning(f"Rate limit hit, waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+            else:
+                raise  # Give up after retries
+
 def _unity_get_creative(*, org_id: str, title_id: str, creative_id: str) -> dict:
     path = f"organizations/{org_id}/apps/{title_id}/creatives/{creative_id}"
     return _unity_get(path)
@@ -587,16 +606,15 @@ def apply_unity_creative_packs_to_campaign(*, game: str, creative_pack_ids: List
                     )
                     
                     try:
-                        _unity_unassign_creative_pack(
-                            org_id=org_id, 
-                            title_id=title_id, 
-                            campaign_id=campaign_id, 
+                        _unity_unassign_with_retry(  # 새 함수 사용
+                            org_id=org_id,
+                            title_id=title_id,
+                            campaign_id=campaign_id,
                             assigned_creative_pack_id=str(assigned_id)
                         )
                         removed_ids.append(str(assigned_id))
-                        time.sleep(0.2) # Fast unassign
+                        time.sleep(1.0)  # 0.2 → 1.0으로 증가
                     except Exception as e:
-                        # Continue even if one fails
                         errors.append(f"Unassign error {assigned_id}: {e}")
             
             # Short sleep between pages

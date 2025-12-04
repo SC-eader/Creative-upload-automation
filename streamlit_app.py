@@ -158,7 +158,7 @@ with st.sidebar:
         st.session_state["page"] = "Creative 자동 업로드"
 
     main_clicked = st.button(
-        "운영",
+        "테스트",
         key="page_main_btn",
         use_container_width=True,
     )
