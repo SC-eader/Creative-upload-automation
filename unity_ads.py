@@ -489,7 +489,7 @@ def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]
         clean_base = base.replace("_", "")
         raw_p_name = playable_name if playable_name else settings.get("existing_playable_label", "").split(" ")[0]
         clean_p = pathlib.Path(raw_p_name).stem.replace("_unityads", "").replace("_", "")
-        final_pack_name = f"{clean_base}{clean_p}"
+        final_pack_name = f"{clean_base}_{clean_p}"
         # --------------------------
 
         try:
