@@ -15,6 +15,82 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------
+# Meta SDK and account helpers
+# --------------------------------------------------------------------
+try:
+    from facebook_business.api import FacebookAdsApi
+    from facebook_business.adobjects.adaccount import AdAccount
+    from facebook_business.adobjects.adset import AdSet
+    from facebook_business.adobjects.adcreative import AdCreative
+    from facebook_business.adobjects.ad import Ad
+    from facebook_business.exceptions import FacebookRequestError
+    FB_AVAILABLE = True
+    FB_IMPORT_ERROR = ""
+except Exception as _e:
+    FB_AVAILABLE = False
+    FB_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+def _require_fb() -> None:
+    """Raise a clear error if the Facebook SDK is missing."""
+    if not FB_AVAILABLE:
+        raise RuntimeError(
+            "facebook-business SDK not available. Install it with:\n"
+            "  pip install facebook-business\n"
+            f"Import error: {FB_IMPORT_ERROR}"
+        )
+
+COUNTRY_OPTIONS = {
+    # Top Tier Markets
+    "United States": "US",
+    "Canada": "CA",
+    "United Kingdom": "GB",
+    "Australia": "AU",
+    "Germany": "DE",
+    "France": "FR",
+    "Japan": "JP",
+    "South Korea": "KR",
+    
+    # European Markets
+    "Italy": "IT",
+    "Spain": "ES",
+    "Netherlands": "NL",
+    "Sweden": "SE",
+    "Switzerland": "CH",
+    "Norway": "NO",
+    "Denmark": "DK",
+    "Finland": "FI",
+    "Austria": "AT",
+    "Belgium": "BE",
+    "Poland": "PL",
+    
+    # Asia-Pacific
+    "Singapore": "SG",
+    "Hong Kong": "HK",
+    "Taiwan": "TW",
+    "Thailand": "TH",
+    "Indonesia": "ID",
+    "Malaysia": "MY",
+    "Philippines": "PH",
+    "Vietnam": "VN",
+    "India": "IN",
+    
+    # Middle East
+    "United Arab Emirates": "AE",
+    "Saudi Arabia": "SA",
+    "Israel": "IL",
+    
+    # Latin America
+    "Brazil": "BR",
+    "Mexico": "MX",
+    "Argentina": "AR",
+    "Chile": "CL",
+    "Colombia": "CO",
+}
+
+# Reverse lookup for displaying selected countries
+COUNTRY_CODE_TO_NAME = {code: name for name, code in COUNTRY_OPTIONS.items()}
+
+# --------------------------------------------------------------------
 # Date / timezone helpers
 # --------------------------------------------------------------------
 ASIA_SEOUL = timezone(timedelta(hours=9))
@@ -35,6 +111,49 @@ def next_sat_0900_kst(today: datetime | None = None) -> str:
 # --------------------------------------------------------------------
 # Settings helpers (store URL, budget, targeting)
 # --------------------------------------------------------------------
+
+def requires_special_compliance(countries: list[str]) -> dict:
+    """
+    Check if any countries require special compliance handling.
+    
+    Returns dict with:
+    {
+        "has_blocked": bool,
+        "blocked": list of blocked country codes,
+        "blocked_reasons": dict of {country: reason},
+        "has_special": bool,
+        "countries": list of countries with special compliance,
+        "types": dict of {country: compliance_type}
+    }
+    """
+    # Countries that CANNOT be targeted via API without manual setup
+    BLOCKED_COUNTRIES = {
+        "TW": {
+            "name": "Taiwan",
+            "reason": "Requires manual business verification in Meta Ads Manager",
+            "details": "Taiwan law requires advertiser identity disclosure and business registration verification"
+        }
+    }
+    
+    # Countries that CAN be handled via API (for future expansion)
+    COMPLIANCE_COUNTRIES = {
+        # Add here if you implement support for other compliance countries
+        # "KR": "KOREA_UNIVERSAL",  # Example: If South Korea needs special handling
+    }
+    
+    blocked = [c for c in countries if c in BLOCKED_COUNTRIES]
+    special_countries = [c for c in countries if c in COMPLIANCE_COUNTRIES]
+    
+    return {
+        "has_blocked": bool(blocked),
+        "blocked": blocked,
+        "blocked_reasons": {c: BLOCKED_COUNTRIES[c]["reason"] for c in blocked},
+        "blocked_details": {c: BLOCKED_COUNTRIES[c] for c in blocked},
+        "has_special": bool(special_countries),
+        "countries": special_countries,
+        "types": {c: COMPLIANCE_COUNTRIES[c] for c in special_countries}
+    }
+
 def sanitize_store_url(raw: str) -> str:
     """
     Normalize store URLs for Meta:
@@ -123,18 +242,25 @@ OPT_GOAL_LABEL_TO_API = {
     "링크 클릭수 극대화": "LINK_CLICKS",
 }
 
-def build_targeting_from_settings(country: str, age_min: int, settings: dict) -> dict:
+def build_targeting_from_settings(countries: list[str], age_min: int, settings: dict) -> dict:
     """
     Build Meta targeting dict from UI settings.
-    Uses Advantage+ placements (no publisher_platforms/device_platforms),
-    and optional OS-family filtering via user_os.
+    
+    Args:
+        countries: List of ISO country codes e.g. ["US", "JP", "KR"]
+        age_min: Minimum age
+        settings: Other targeting settings
     """
     os_choice = settings.get("os_choice", "Both")
     min_android = settings.get("min_android_os_token")
     min_ios = settings.get("min_ios_os_token")
 
+    # CRITICAL: Ensure countries is always a list
+    if isinstance(countries, str):
+        countries = [countries]  # Convert old single-country format
+    
     targeting = {
-        "geo_locations": {"countries": [country]},
+        "geo_locations": {"countries": countries},  # ← Must be a list
         "age_min": max(13, int(age_min)),
     }
 
@@ -156,6 +282,7 @@ def build_targeting_from_settings(country: str, age_min: int, settings: dict) ->
         targeting["user_os"] = user_os
 
     return targeting
+
 
 def make_ad_name(filename: str, prefix: str | None) -> str:
     """Build ad name from filename and optional prefix."""
@@ -233,30 +360,7 @@ def init_fb_game_defaults() -> None:
             cur["store_url"] = defaults["store_url"]
         st.session_state.settings[game] = cur
 
-# --------------------------------------------------------------------
-# Meta SDK and account helpers
-# --------------------------------------------------------------------
-try:
-    from facebook_business.api import FacebookAdsApi
-    from facebook_business.adobjects.adaccount import AdAccount
-    from facebook_business.adobjects.adset import AdSet
-    from facebook_business.adobjects.adcreative import AdCreative
-    from facebook_business.adobjects.ad import Ad
-    from facebook_business.exceptions import FacebookRequestError
-    FB_AVAILABLE = True
-    FB_IMPORT_ERROR = ""
-except Exception as _e:
-    FB_AVAILABLE = False
-    FB_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
 
-def _require_fb() -> None:
-    """Raise a clear error if the Facebook SDK is missing."""
-    if not FB_AVAILABLE:
-        raise RuntimeError(
-            "facebook-business SDK not available. Install it with:\n"
-            "  pip install facebook-business\n"
-            f"Import error: {FB_IMPORT_ERROR}"
-        )
 
 def init_fb_from_secrets(ad_account_id: str | None = None) -> "AdAccount":
     """
@@ -722,6 +826,43 @@ def _plan_upload(
     )
     ad_names = [make_ad_name(_name(u), ad_name_prefix) for u in vids_all]
 
+    # CRITICAL: Get countries as list (backward compatible)
+    countries = settings.get("countries", ["US"])
+    if isinstance(countries, str):
+        countries = [countries]  # Old format conversion
+
+    return {
+        "campaign_id": campaign_id,
+        "adset_name": adset_name,
+        "countries": countries,  # ← Changed from "country" (string) to "countries" (list)
+        "age_min": int(settings.get("age_min", 18)),
+        "budget_usd_per_day": int(budget_usd_per_day),
+        "start_iso": start_iso,
+        "end_iso": end_iso,
+        "page_id": page_id,
+        "n_videos": len(vids_all),
+        "ad_names": ad_names,
+        "campaign_name": settings.get("campaign_name"),
+        "app_store": settings.get("app_store"),
+        "opt_goal_label": settings.get("opt_goal_label"),
+    }
+
+    def _name(u):
+        return getattr(u, "name", None) or (u.get("name") if isinstance(u, dict) else "")
+
+    def _is_video(u):
+        return pathlib.Path(_name(u)).suffix.lower() in allowed
+
+    vids_local = [u for u in (uploaded_files or []) if _is_video(u)]
+    vids_all = _dedupe_by_name(vids_local + [rv for rv in remote if _is_video(rv)])
+
+    budget_usd_per_day = compute_budget_from_settings(vids_all, settings)
+
+    ad_name_prefix = (
+        settings.get("ad_name_prefix") if settings.get("ad_name_mode") == "Prefix + filename" else None
+    )
+    ad_names = [make_ad_name(_name(u), ad_name_prefix) for u in vids_all]
+
     return {
         "campaign_id": campaign_id,
         "adset_name": adset_name,
@@ -752,8 +893,29 @@ def create_creativetest_adset(
 ) -> str:
     """
     Create an ACTIVE ad set for a creative test and return its ID.
+    
+    Note: Taiwan targeting requires manual business verification in Meta Ads Manager.
+    This function will block Taiwan and provide clear guidance to users.
     """
     from facebook_business.adobjects.adset import AdSet
+
+    # Check for Taiwan BEFORE creating the ad set
+    countries = targeting.get("geo_locations", {}).get("countries", [])
+    if "TW" in countries:
+        raise RuntimeError(
+            "❌ **Taiwan (TW) Targeting Not Supported via API**\n\n"
+            "Meta requires manual business verification for Taiwan ads.\n\n"
+            "**Why?** Taiwan has strict advertising disclosure laws requiring:\n"
+            "• Business registration verification\n"
+            "• Advertiser identity disclosure\n"
+            "• Tax ID (統一編號) submission\n\n"
+            "**Solutions:**\n"
+            "1. ✅ Remove Taiwan from your country selection\n"
+            "2. ✅ Complete Taiwan verification in Meta Business Settings first\n"
+            "3. ✅ Create Taiwan ad sets manually in Meta Ads Manager\n"
+            "4. ✅ Target Taiwan in a separate campaign\n\n"
+            "All other countries (US, JP, KR, etc.) work fine via API."
+        )
 
     params = {
         "name": adset_name,
@@ -911,15 +1073,18 @@ def upload_to_facebook(
         uploaded_files=uploaded_files,
         settings=settings,
     )
+    
+    
     if simulate:
         return plan
 
-    # Targeting
+    # CRITICAL FIX: Pass countries LIST instead of single country
     targeting = build_targeting_from_settings(
-        country=plan["country"],
+        countries=plan["countries"],  # ← Changed from country=plan["country"]
         age_min=plan["age_min"],
         settings=settings,
     )
+    
 
     # Optimization goal + promoted_object
     opt_goal_label = settings.get("opt_goal_label") or "앱 설치수 극대화"
@@ -960,6 +1125,7 @@ def upload_to_facebook(
         raise RuntimeError(
             "Ad set was not created (no ID returned). Check the error above and fix settings/permissions."
         )
+    
 
     ad_name_prefix = (
         settings.get("ad_name_prefix") if settings.get("ad_name_mode") == "Prefix + filename" else None
@@ -990,6 +1156,8 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
     """
     Render the Facebook settings panel for a single game and save
     values into st.session_state.settings[game].
+    
+    Includes validation for Taiwan and other compliance countries.
     """
     _ensure_settings_state()
     cur = st.session_state.settings.get(game, {})
@@ -1009,9 +1177,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         app_store = st.selectbox(
             "모바일 앱 스토어",
             ["Google Play 스토어", "Apple App Store"],
-            index=0
-            if cur.get("app_store", "Google Play 스토어") == "Google Play 스토어"
-            else 1,
+            index=0 if cur.get("app_store", "Google Play 스토어") == "Google Play 스토어" else 1,
             key=f"appstore_{idx}",
         )
 
@@ -1021,27 +1187,22 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             key=f"fbappid_{idx}",
             help="설치 추적을 연결하려면 FB App ID를 입력하세요(선택).",
         )
+        
         store_url = st.text_input(
             "구글 스토어 URL",
             value=cur.get("store_url", ""),
             key=f"storeurl_{idx}",
-            help="예) https://play.google.com/store/apps/details?id=... "
-                 "(쿼리스트링/트래킹 파라미터 제거 권장)",
+            help="예) https://play.google.com/store/apps/details?id=... (쿼리스트링/트래킹 파라미터 제거 권장)",
         )
 
         opt_goal_label = st.selectbox(
             "성과 목표",
             list(OPT_GOAL_LABEL_TO_API.keys()),
-            index=list(OPT_GOAL_LABEL_TO_API.keys()).index(
-                cur.get("opt_goal_label", "앱 설치수 극대화")
-            ),
+            index=list(OPT_GOAL_LABEL_TO_API.keys()).index(cur.get("opt_goal_label", "앱 설치수 극대화")),
             key=f"optgoal_{idx}",
         )
 
-        st.caption(
-            "기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — "
-            "Facebook에서 고정/제한될 수 있습니다."
-        )
+        st.caption("기여 설정: 클릭 1일(기본), 참여한 조회/조회 없음 — Facebook에서 고정/제한될 수 있습니다.")
 
         budget_per_video_usd = st.number_input(
             "영상 1개당 일일 예산 (USD)",
@@ -1055,8 +1216,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         start_iso = st.text_input(
             "시작 날짜/시간 (ISO, KST)",
             value=cur.get("start_iso", default_start_iso),
-            help="예: 2025-11-15T00:00:00+09:00 "
-                 "(종료일은 자동으로 꺼지지 않도록 설정하지 않습니다)",
+            help="예: 2025-11-15T00:00:00+09:00 (종료일은 자동으로 꺼지지 않도록 설정하지 않습니다)",
             key=f"start_{idx}",
         )
 
@@ -1077,11 +1237,100 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             ),
         )
 
-        country = st.text_input(
-            "국가",
-            value=cur.get("country", "US"),
-            key=f"country_{idx}",
+        st.markdown("#### 타겟팅 설정")
+        
+        # Get previously saved countries (could be string or list)
+        saved_countries = cur.get("countries", ["US"])
+        if isinstance(saved_countries, str):
+            saved_countries = [saved_countries]
+        
+        # Create default selection (convert codes to names)
+        default_selection = [
+            COUNTRY_CODE_TO_NAME.get(code, code) 
+            for code in saved_countries 
+            if code in COUNTRY_CODE_TO_NAME.values()
+        ]
+        
+        # If no valid defaults, use US
+        if not default_selection:
+            default_selection = ["United States"]
+        
+        selected_country_names = st.multiselect(
+            "타겟 국가 (여러 개 선택 가능)",
+            options=sorted(COUNTRY_OPTIONS.keys()),
+            default=default_selection,
+            key=f"countries_{idx}",
+            help="Meta 광고를 게재할 국가를 선택하세요. 여러 국가 선택 가능합니다."
         )
+        
+        # Convert selected names back to country codes
+        selected_country_codes = [
+            COUNTRY_OPTIONS[name] for name in selected_country_names
+        ]
+        
+        # Show warning if no country selected
+        if not selected_country_codes:
+            st.warning("⚠️ 최소 1개 국가를 선택해주세요.")
+            selected_country_codes = ["US"]  # Fallback
+        
+        # Check for compliance/blocked countries
+        compliance_info = requires_special_compliance(selected_country_codes)
+        
+        # Show blocking error for Taiwan or other blocked countries
+        if compliance_info["has_blocked"]:
+            blocked_details = compliance_info["blocked_details"]
+            
+            st.error(
+                "🚫 **다음 국가는 API를 통해 타겟팅할 수 없습니다:**\n\n" +
+                "\n".join(
+                    f"**{details['name']}**\n"
+                    f"- 이유: {details['reason']}\n"
+                    f"- 상세: {details['details']}\n"
+                    for c, details in blocked_details.items()
+                ) +
+                "\n\n**해결방법:**\n"
+                "1. 해당 국가를 선택 해제하고 다시 시도하세요\n"
+                "2. 또는 Meta Ads Manager에서 수동으로 광고 세트를 생성하세요"
+            )
+            
+            # Auto-remove blocked countries from selection
+            original_count = len(selected_country_codes)
+            selected_country_codes = [
+                c for c in selected_country_codes 
+                if c not in compliance_info["blocked"]
+            ]
+            
+            removed_count = original_count - len(selected_country_codes)
+            if removed_count > 0:
+                removed_names = [
+                    COUNTRY_CODE_TO_NAME.get(c, c) 
+                    for c in compliance_info["blocked"]
+                ]
+                st.warning(f"⚠️ 자동 제거됨: {', '.join(removed_names)}")
+            
+            if not selected_country_codes:
+                selected_country_codes = ["US"]
+                st.info("ℹ️ 기본값으로 United States가 선택되었습니다.")
+        
+        # Show info for supported special compliance countries (future expansion)
+        if compliance_info["has_special"]:
+            special_names = [
+                COUNTRY_CODE_TO_NAME.get(c, c) 
+                for c in compliance_info["countries"]
+            ]
+            st.info(
+                f"ℹ️ **규제 준수 알림**\n\n"
+                f"선택한 국가에 특별 규정 준수가 필요합니다: {', '.join(special_names)}\n\n"
+                f"다음 설정이 자동으로 적용됩니다:\n" +
+                "\n".join(
+                    f"- {COUNTRY_CODE_TO_NAME.get(c, c)}: {t}" 
+                    for c, t in compliance_info["types"].items()
+                )
+            )
+        
+        # Display final selected countries
+        final_names = [COUNTRY_CODE_TO_NAME.get(c, c) for c in selected_country_codes]
+        st.success(f"✅ 선택된 국가: {', '.join(final_names)}")
 
         age_min = st.number_input(
             "최소 연령",
@@ -1093,9 +1342,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
         os_choice = st.selectbox(
             "Target OS",
             ["Both", "Android only", "iOS only"],
-            index={"Both": 0, "Android only": 1, "iOS only": 2}[
-                cur.get("os_choice", "Android only")
-            ],
+            index={"Both": 0, "Android only": 1, "iOS only": 2}[cur.get("os_choice", "Android only")],
             key=f"os_choice_{idx}",
         )
 
@@ -1103,9 +1350,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             min_android_label = st.selectbox(
                 "Min Android version",
                 list(ANDROID_OS_CHOICES.keys()),
-                index=list(ANDROID_OS_CHOICES.keys()).index(
-                    cur.get("min_android_label", "6.0+")
-                ),
+                index=list(ANDROID_OS_CHOICES.keys()).index(cur.get("min_android_label", "6.0+")),
                 key=f"min_android_{idx}",
             )
         else:
@@ -1115,9 +1360,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             min_ios_label = st.selectbox(
                 "Min iOS version",
                 list(IOS_OS_CHOICES.keys()),
-                index=list(IOS_OS_CHOICES.keys()).index(
-                    cur.get("min_ios_label", "None (any)")
-                ),
+                index=list(IOS_OS_CHOICES.keys()).index(cur.get("min_ios_label", "None (any)")),
                 key=f"min_ios_{idx}",
             )
         else:
@@ -1140,6 +1383,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             index=1 if cur.get("ad_name_mode") == "Prefix + filename" else 0,
             key=f"adname_mode_{idx}",
         )
+        
         ad_name_prefix = ""
         if ad_name_mode == "Prefix + filename":
             ad_name_prefix = st.text_input(
@@ -1148,6 +1392,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
                 key=f"adname_prefix_{idx}",
             )
 
+        # Save settings with validated countries
         st.session_state.settings[game] = {
             "suffix_number": int(suffix_number),
             "add_launch_date": bool(add_launch_date),
@@ -1157,7 +1402,7 @@ def render_facebook_settings_panel(container, game: str, idx: int) -> None:
             "opt_goal_label": opt_goal_label,
             "budget_per_video_usd": int(budget_per_video_usd),
             "start_iso": start_iso.strip(),
-            "country": (country or "US").strip(),
+            "countries": selected_country_codes,  # Validated and cleaned list
             "age_min": int(age_min),
             "os_choice": os_choice,
             "min_android_label": min_android_label,

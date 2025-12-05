@@ -9,6 +9,7 @@ import pathlib
 import re
 import os
 import json
+import hashlib
 
 import time
 import requests
@@ -169,6 +170,51 @@ def render_unity_settings_panel(right_col, game: str, idx: int) -> None:
 # --------------------------------------------------------------------
 # Utilities
 # --------------------------------------------------------------------
+
+def _get_upload_state_key(game: str, campaign_id: str) -> str:
+    """Generate a unique key for tracking upload state per game/campaign."""
+    return f"unity_upload_state_{game}_{campaign_id}"
+
+def _init_upload_state(game: str, campaign_id: str, videos: List[Dict]) -> Dict:
+    """
+    Initialize or load upload state for resumability.
+    
+    State structure:
+    {
+        "video_creatives": {
+            "video_filename.mp4": "creative_id_12345" or None
+        },
+        "playable_creative": "creative_id_67890" or None,
+        "creative_packs": {
+            "pack_name": "pack_id_abc" or None
+        },
+        "completed_packs": ["pack_id_1", "pack_id_2"],
+        "total_expected": 10
+    }
+    """
+    key = _get_upload_state_key(game, campaign_id)
+    
+    if key not in st.session_state:
+        # Initialize new state
+        state = {
+            "video_creatives": {},
+            "playable_creative": None,
+            "creative_packs": {},
+            "completed_packs": [],
+            "total_expected": 0
+        }
+        
+        # Pre-populate video names
+        for v in videos or []:
+            name = v.get("name", "")
+            if "playable" not in name.lower():
+                state["video_creatives"][name] = None
+        
+        st.session_state[key] = state
+    
+    return st.session_state[key]
+
+
 ASIA_SEOUL = timezone(timedelta(hours=9))
 
 def next_sat_0000_kst(today: datetime | None = None) -> str:
@@ -415,16 +461,92 @@ def _unity_list_playable_creatives(*, org_id: str, title_id: str) -> List[dict]:
 
     return playables
 
+
+def _save_upload_state(game: str, campaign_id: str, state: Dict):
+    """Save upload state to session."""
+    key = _get_upload_state_key(game, campaign_id)
+    st.session_state[key] = state
+
+
+def _clear_upload_state(game: str, campaign_id: str):
+    """Clear upload state (call when upload completes successfully)."""
+    key = _get_upload_state_key(game, campaign_id)
+    if key in st.session_state:
+        del st.session_state[key]
+
+
+def _check_existing_creative(org_id: str, title_id: str, name: str) -> str | None:
+    """
+    Check if a creative with this name already exists in Unity.
+    Returns creative_id if found, None otherwise.
+    """
+    try:
+        path = f"organizations/{org_id}/apps/{title_id}/creatives"
+        meta = _unity_get(path, params={"limit": 100})
+        
+        items = []
+        if isinstance(meta, list):
+            items = meta
+        elif isinstance(meta, dict):
+            items = meta.get("items") or meta.get("data") or []
+        
+        for creative in items:
+            if creative.get("name") == name:
+                return str(creative.get("id", ""))
+        
+        return None
+    except Exception as e:
+        logger.warning(f"Could not check existing creative: {e}")
+        return None
+
+
+def _check_existing_pack(org_id: str, title_id: str, pack_name: str) -> str | None:
+    """
+    Check if a creative pack with this name already exists.
+    Returns pack_id if found, None otherwise.
+    """
+    try:
+        path = f"organizations/{org_id}/apps/{title_id}/creative-packs"
+        meta = _unity_get(path, params={"limit": 100})
+        
+        items = []
+        if isinstance(meta, list):
+            items = meta
+        elif isinstance(meta, dict):
+            items = meta.get("items") or meta.get("data") or []
+        
+        for pack in items:
+            if pack.get("name") == pack_name:
+                return str(pack.get("id", ""))
+        
+        return None
+    except Exception as e:
+        logger.warning(f"Could not check existing pack: {e}")
+        return None
 # --------------------------------------------------------------------
 # Main Helpers
 # --------------------------------------------------------------------
 
-def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]], settings: Dict[str, Any]) -> Dict[str, Any]:
+def upload_unity_creatives_to_campaign(
+    *, 
+    game: str, 
+    videos: List[Dict[str, Any]], 
+    settings: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Upload Unity creatives and packs with resume support.
+    
+    If upload fails midway, calling again will:
+    - Skip already uploaded creatives
+    - Only upload missing items
+    - Resume from where it left off
+    """
     title_id = (settings.get("title_id") or "").strip() or str(UNITY_GAME_IDS.get(game, ""))
     campaign_id = (settings.get("campaign_id") or "").strip()
     if not campaign_id:
         ids_for_game = UNITY_CAMPAIGN_IDS.get(game) or []
-        if ids_for_game: campaign_id = str(ids_for_game[0])
+        if ids_for_game:
+            campaign_id = str(ids_for_game[0])
     
     org_id = (settings.get("org_id") or "").strip() or UNITY_ORG_ID_DEFAULT
     
@@ -432,137 +554,263 @@ def upload_unity_creatives_to_campaign(*, game: str, videos: List[Dict[str, Any]
         raise RuntimeError("Unity Settings Missing for upload.")
 
     start_iso = next_sat_0000_kst()
-    new_creative_pack_ids: List[str] = []
     errors: List[str] = []
+    
+    # Initialize upload state (loads existing if resuming)
+    upload_state = _init_upload_state(game, campaign_id, videos)
+    
+    # Show resume info if applicable
+    existing_packs = len([p for p in upload_state["completed_packs"] if p])
+    if existing_packs > 0:
+        st.info(
+            f"📦 **Resuming Upload**\n\n"
+            f"Found {existing_packs} previously created pack(s).\n"
+            f"Will skip already uploaded items and continue from where we left off."
+        )
 
+    # ========================================
     # 1. PLAYABLE HANDLING
+    # ========================================
     playable_name = settings.get("selected_playable") or ""
     existing_playable_id = settings.get("existing_playable_id") or ""
-    playable_creative_id: str | None = None
+    playable_creative_id: str | None = upload_state.get("playable_creative")
 
-    if playable_name:
-        playable_item = next((v for v in (videos or []) if v.get("name") == playable_name), None)
-        if playable_item:
-            try:
-                playable_creative_id = _unity_create_playable_creative(
-                    org_id=org_id, title_id=title_id, playable_path=playable_item["path"], name=playable_name
-                )
-            except Exception as e:
-                errors.append(f"Playable creation failed: {e}")
-                playable_creative_id = None
+    if not playable_creative_id:
+        if playable_name:
+            playable_item = next((v for v in (videos or []) if v.get("name") == playable_name), None)
+            if playable_item:
+                try:
+                    # Check if already uploaded
+                    playable_creative_id = _check_existing_creative(org_id, title_id, playable_name)
+                    
+                    if playable_creative_id:
+                        st.info(f"✅ Found existing playable: {playable_name}")
+                    else:
+                        st.info(f"⬆️ Uploading playable: {playable_name}")
+                        playable_creative_id = _unity_create_playable_creative(
+                            org_id=org_id, 
+                            title_id=title_id, 
+                            playable_path=playable_item["path"], 
+                            name=playable_name
+                        )
+                    
+                    upload_state["playable_creative"] = playable_creative_id
+                    _save_upload_state(game, campaign_id, upload_state)
+                    
+                except Exception as e:
+                    errors.append(f"Playable creation failed: {e}")
+                    playable_creative_id = None
 
-    if not playable_creative_id and existing_playable_id:
-        playable_creative_id = str(existing_playable_id)
+        if not playable_creative_id and existing_playable_id:
+            playable_creative_id = str(existing_playable_id)
+            upload_state["playable_creative"] = playable_creative_id
+            _save_upload_state(game, campaign_id, upload_state)
 
-    # Validate Playable ID
+    # Validate Playable
     if playable_creative_id:
         try:
-            logger.info(f"Validating Playable ID: {playable_creative_id}")
             p_details = _unity_get_creative(org_id=org_id, title_id=title_id, creative_id=playable_creative_id)
             p_type = (p_details.get("type") or "").lower()
             
             if "playable" not in p_type and "cpe" not in p_type:
                 error_msg = f"CRITICAL: Playable ID ({playable_creative_id}) is type '{p_type}'. Must be 'playable'."
                 errors.append(error_msg)
-                return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+                return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": upload_state["completed_packs"]}
         except Exception as e:
             errors.append(f"Could not validate Playable ID: {e}")
-            return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+            return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": upload_state["completed_packs"]}
     else:
         errors.append("No Playable End Card selected.")
-        return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": []}
+        return {"game": game, "campaign_id": campaign_id, "errors": errors, "creative_ids": upload_state["completed_packs"]}
 
+    # ========================================
     # 2. VIDEO PAIRING
-    # 2. VIDEO PAIRING
+    # ========================================
     subjects: dict[str, list[dict]] = {}
     for v in videos or []:
         n = v.get("name") or ""
-        # IMPORTANT: Exclude files named "playable" from being uploaded as VIDEO creatives
-        if "playable" in n.lower(): continue 
-        base = n.split("_")[0] 
+        if "playable" in n.lower():
+            continue
+        base = n.split("_")[0]
         subjects.setdefault(base, []).append(v)
 
     total_pairs = len(subjects)
-    progress_bar = None
-    processed_count = 0
+    upload_state["total_expected"] = total_pairs
+    _save_upload_state(game, campaign_id, upload_state)
     
-    if total_pairs > 0:
-        progress_bar = st.progress(0, text=f"Creative Pack 생성 준비 중 (0/{total_pairs})...")
+    if total_pairs == 0:
+        st.warning("No video pairs found to upload.")
+        return {
+            "game": game,
+            "campaign_id": campaign_id,
+            "errors": errors,
+            "creative_ids": upload_state["completed_packs"]
+        }
 
+    processed_count = 0
+    progress_bar = st.progress(0, text=f"Starting upload... (0/{total_pairs})")
+    
+    # Status container for real-time updates
+    status_container = st.empty()
+
+    # ========================================
     # 3. PROCESSING LOOP
+    # ========================================
     for base, items in subjects.items():
-        time.sleep(2) # Throttle API calls
-
         portrait = next((x for x in items if "1080x1920" in (x.get("name") or "")), None)
         landscape = next((x for x in items if "1920x1080" in (x.get("name") or "")), None)
 
         if not portrait or not landscape:
             errors.append(f"{base}: Missing Portrait or Landscape video.")
             processed_count += 1
-            if progress_bar:
-                pct = int(processed_count / total_pairs * 100)
-                progress_bar.progress(pct, text=f"Skipping {base} (Missing video) - {processed_count}/{total_pairs}")
+            progress_bar.progress(
+                int(processed_count / total_pairs * 100),
+                text=f"❌ Skipped {base} (Missing videos) - {processed_count}/{total_pairs}"
+            )
             continue
         
-        # --- CLEAN NAMING LOGIC ---
+        # Generate pack name
         clean_base = base.replace("_", "")
         raw_p_name = playable_name if playable_name else settings.get("existing_playable_label", "").split(" ")[0]
         clean_p = pathlib.Path(raw_p_name).stem.replace("_unityads", "").replace("_", "")
         final_pack_name = f"{clean_base}_{clean_p}"
-        # --------------------------
+        
+        # Check if pack already exists
+        if final_pack_name in upload_state["creative_packs"] and upload_state["creative_packs"][final_pack_name]:
+            pack_id = upload_state["creative_packs"][final_pack_name]
+            if pack_id not in upload_state["completed_packs"]:
+                upload_state["completed_packs"].append(pack_id)
+                _save_upload_state(game, campaign_id, upload_state)
+            
+            processed_count += 1
+            progress_bar.progress(
+                int(processed_count / total_pairs * 100),
+                text=f"✅ Already uploaded: {base} - {processed_count}/{total_pairs}"
+            )
+            status_container.success(f"✅ Skipped (already exists): {final_pack_name}")
+            continue
 
         try:
-            if progress_bar:
-                progress_bar.progress(
-                    int(processed_count / total_pairs * 100), 
-                    text=f"Uploading videos for {base} ({processed_count + 1}/{total_pairs})..."
+            progress_bar.progress(
+                int(processed_count / total_pairs * 100),
+                text=f"⬆️ Uploading {base} ({processed_count + 1}/{total_pairs})..."
+            )
+            
+            # Upload portrait video (check if exists first)
+            p_id = upload_state["video_creatives"].get(portrait["name"])
+            if not p_id:
+                p_id = _check_existing_creative(org_id, title_id, portrait["name"])
+                
+            if not p_id:
+                status_container.info(f"⬆️ Uploading portrait: {portrait['name']}")
+                p_id = _unity_create_video_creative(
+                    org_id=org_id, 
+                    title_id=title_id, 
+                    video_path=portrait["path"], 
+                    name=portrait["name"]
                 )
-
-            # Create Videos
-            p_id = _unity_create_video_creative(
-                org_id=org_id, title_id=title_id, video_path=portrait["path"], name=portrait["name"]
-            )
-            time.sleep(1) # Small gap between uploads
-            l_id = _unity_create_video_creative(
-                org_id=org_id, title_id=title_id, video_path=landscape["path"], name=landscape["name"]
-            )
+                upload_state["video_creatives"][portrait["name"]] = p_id
+                _save_upload_state(game, campaign_id, upload_state)
+                time.sleep(1)
+            else:
+                status_container.success(f"✅ Found existing: {portrait['name']}")
+            
+            # Upload landscape video (check if exists first)
+            l_id = upload_state["video_creatives"].get(landscape["name"])
+            if not l_id:
+                l_id = _check_existing_creative(org_id, title_id, landscape["name"])
+                
+            if not l_id:
+                status_container.info(f"⬆️ Uploading landscape: {landscape['name']}")
+                l_id = _unity_create_video_creative(
+                    org_id=org_id, 
+                    title_id=title_id, 
+                    video_path=landscape["path"], 
+                    name=landscape["name"]
+                )
+                upload_state["video_creatives"][landscape["name"]] = l_id
+                _save_upload_state(game, campaign_id, upload_state)
+                time.sleep(1)
+            else:
+                status_container.success(f"✅ Found existing: {landscape['name']}")
 
             pack_creatives = [p_id, l_id, playable_creative_id]
             
-            # Create Pack "video+playable"
-            pack_id = _unity_create_creative_pack(
-                org_id=org_id,
-                title_id=title_id,
-                pack_name=final_pack_name, 
-                creative_ids=pack_creatives,
-                pack_type="video+playable"
-            )
-            new_creative_pack_ids.append(pack_id)
+            # Check if pack already exists
+            pack_id = _check_existing_pack(org_id, title_id, final_pack_name)
+            
+            if not pack_id:
+                status_container.info(f"📦 Creating pack: {final_pack_name}")
+                pack_id = _unity_create_creative_pack(
+                    org_id=org_id,
+                    title_id=title_id,
+                    pack_name=final_pack_name,
+                    creative_ids=pack_creatives,
+                    pack_type="video+playable"
+                )
+            else:
+                status_container.success(f"✅ Found existing pack: {final_pack_name}")
+            
+            upload_state["creative_packs"][final_pack_name] = pack_id
+            upload_state["completed_packs"].append(pack_id)
+            _save_upload_state(game, campaign_id, upload_state)
+            
+            status_container.success(f"✅ Completed: {final_pack_name}")
+            time.sleep(0.5)
 
         except Exception as e:
             msg = str(e)
-            if "Quota Exceeded" in msg:
-                errors.append(f"FATAL: {msg}")
-                break 
+            if "Quota Exceeded" in msg or "429" in msg:
+                errors.append(f"⚠️ Rate limit reached at {base}. Progress saved - you can retry!")
+                status_container.error(
+                    f"⚠️ **Rate Limit Reached**\n\n"
+                    f"Progress saved: {len(upload_state['completed_packs'])}/{total_pairs} packs created.\n"
+                    f"Click '크리에이티브/팩 생성' again to resume from where we left off."
+                )
+                break
+            
             logger.exception(f"Unity pack creation failed for {base}")
             errors.append(f"{base}: {msg}")
+            status_container.error(f"❌ Failed: {base} - {msg}")
 
         finally:
             processed_count += 1
-            if progress_bar:
-                pct = int(processed_count / total_pairs * 100)
-                progress_bar.progress(pct, text=f"Completed {processed_count}/{total_pairs} packs")
+            pct = int(processed_count / total_pairs * 100)
+            completed = len(upload_state["completed_packs"])
+            progress_bar.progress(
+                pct, 
+                text=f"Progress: {completed}/{total_pairs} packs created"
+            )
 
-    if progress_bar: 
-        progress_bar.empty()
-
+    progress_bar.empty()
+    status_container.empty()
+    
+    # Final summary
+    total_created = len(upload_state["completed_packs"])
+    
+    if total_created == total_pairs:
+        st.success(
+            f"🎉 **Upload Complete!**\n\n"
+            f"Successfully created **{total_created}/{total_pairs}** creative packs."
+        )
+        # Clear state on successful completion
+        _clear_upload_state(game, campaign_id)
+    elif total_created > 0:
+        st.warning(
+            f"⚠️ **Partial Upload**\n\n"
+            f"Created **{total_created}/{total_pairs}** creative packs.\n"
+            f"Click '크리에이티브/팩 생성' again to continue uploading remaining packs."
+        )
+    
     return {
         "game": game,
         "campaign_id": campaign_id,
         "start_iso": start_iso,
-        "creative_ids": new_creative_pack_ids,
+        "creative_ids": upload_state["completed_packs"],
         "errors": errors,
         "removed_ids": [],
+        "total_created": total_created,
+        "total_expected": total_pairs
     }
 
 def apply_unity_creative_packs_to_campaign(*, game: str, creative_pack_ids: List[str], settings: Dict[str, Any]) -> Dict[str, Any]:
