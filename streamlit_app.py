@@ -155,7 +155,7 @@ with st.sidebar:
     st.markdown("### 페이지 선택")
 
     if "page" not in st.session_state:
-        st.session_state["page"] = "Creative 자동 업로드"
+        st.session_state["page"] = "Creative 자동 업로드"  # 내부 로직용 ID 유지
 
     main_clicked = st.button(
         "테스트",
@@ -173,9 +173,9 @@ with st.sidebar:
     if marketer_clicked:
         st.session_state["page"] = "Creative 자동 업로드 - 마케터"
 
-    page = st.session_state["page"]
-
-    st.caption(f"현재 페이지: **{page}**")
+    # 현재 페이지 표시 텍스트도 간소화
+    current_display = "Test" if st.session_state["page"] == "Creative 자동 업로드" else "Marketer"
+    st.caption(f"현재 페이지: **{current_display}**")
 
 
 # ======================================================================
@@ -183,8 +183,12 @@ with st.sidebar:
 # ======================================================================
 def render_main_app(title: str, fb_module, unity_module, is_marketer: bool = False) -> None:
     """Render the full Creative 자동 업로드 UI with the given page title and helper modules."""
+    
+    # 1. 타이틀 변경 (요청사항)
     st.title(title)
-    st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.")
+    
+    # 2. 캡션(소제목) 삭제 (요청사항)
+    # st.caption("게임별 크리에이티브를 다운받고, 설정에 따라 자동으로 업로드합니다.") <- 삭제됨
 
     NUM_GAMES = 10
     GAMES = game_tabs(NUM_GAMES)
@@ -537,9 +541,13 @@ def render_main_app(title: str, fb_module, unity_module, is_marketer: bool = Fal
 # ======================================================================
 # PAGE ROUTING: 운영 / 마케터 – 모듈 세트만 다르게
 # ======================================================================
-if page == "Creative 자동 업로드":
+
+# Retrieve the current page from session state (Default to "Creative 자동 업로드" if missing)
+current_page = st.session_state.get("page", "Creative 자동 업로드")
+
+if current_page == "Creative 자동 업로드":
     # 운영: facebook_ads / unity_ads 사용
-    render_main_app("🎮 Creative 자동 업로드", fb_ops, uni_ops, is_marketer=False)
-else:  # "Creative 자동 업로드 - 마케터"
+    render_main_app("Test", fb_ops, uni_ops, is_marketer=False)
+else:
     # 마케터: fb.py / uni.py 사용
-    render_main_app("🎮 Creative 자동 업로드 - 마케터", fb_marketer, uni_marketer, is_marketer=True)
+    render_main_app("Marketer", fb_marketer, uni_marketer, is_marketer=True)
